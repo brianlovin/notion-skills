@@ -19,6 +19,8 @@ on:
       - "test/**"
       - "tsconfig.json"
       - "package-lock.json"
+  # Allow manual re-runs from the Actions tab (or `gh workflow run release.yml`).
+  workflow_dispatch:
 
 jobs:
   release:
@@ -26,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write     # needed to create the GitHub Release + tag
-      id-token: write     # for npm provenance
+      id-token: write     # for OIDC publishing + npm provenance
 
     steps:
       - name: Checkout
@@ -37,8 +39,14 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
+
+      # OIDC trusted publishing requires a recent npm. Node 22 ships with an
+      # npm that does not yet support `--provenance --access public` over
+      # OIDC. Pin to a version known to support it.
+      - name: Upgrade npm
+        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: npm ci
@@ -49,20 +57,29 @@ jobs:
       - name: Test
         run: node --test test/*.test.mjs
 
-      - name: Publish to npm if version bumped
-        id: publish
-        uses: JS-DevTools/npm-publish@v3
-        with:
-          # No `token:` — auth comes from npm's OIDC trusted publisher.
-          # The id-token: write permission above is what makes this work.
-          access: public
-          provenance: true
+      - name: Check if version was bumped
+        id: check
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          PKG_NAME=$(node -p "require('./package.json').name")
+          echo "version=$PKG_VERSION" >> $GITHUB_OUTPUT
+          if npm view "$PKG_NAME@$PKG_VERSION" version >/dev/null 2>&1; then
+            echo "$PKG_NAME@$PKG_VERSION already published; nothing to do"
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+          else
+            echo "$PKG_NAME@$PKG_VERSION not on npm; will publish"
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish to npm
+        if: steps.check.outputs.should_publish == 'true'
+        run: npm publish --provenance --access public
 
       - name: Tag and create GitHub Release
-        if: steps.publish.outputs.type
+        if: steps.check.outputs.should_publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.publish.outputs.version }}
+          VERSION: ${{ steps.check.outputs.version }}
         run: |
           # Tag may already exist if the maintainer ran `npm version` locally
           # and pushed with --follow-tags. Only create+push if missing.
@@ -70,6 +87,10 @@ jobs:
             git tag "v$VERSION"
             git push origin "v$VERSION"
           fi
-          gh release create "v$VERSION" \
-            --title "v$VERSION" \
-            --generate-notes
+          # `gh release create` will skip silently if the release already
+          # exists, so manual reruns of this workflow are safe.
+          if ! gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release create "v$VERSION" \
+              --title "v$VERSION" \
+              --generate-notes
+          fi
