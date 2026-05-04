@@ -1,0 +1,42 @@
+{
+  "name": "notion-skills",
+  "version": "0.1.0",
+  "description": "Sync skills from a Notion database to your AI coding agents (Claude Code, Codex).",
+  "type": "module",
+  "bin": {
+    "notion-skills": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "notion",
+    "claude-code",
+    "skills",
+    "codex",
+    "cli"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@inquirer/prompts": "^7.2.1",
+    "chalk": "^5.4.1",
+    "commander": "^12.1.0",
+    "open": "^10.1.0",
+    "ora": "^8.1.1",
+    "yaml": "^2.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
