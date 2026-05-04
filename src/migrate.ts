@@ -16,20 +16,20 @@ export interface ParsedSkill {
   source: string;        // realpath to canonical skill dir
   sourceDisplay: string; // human-friendly canonical path
   /**
-   * If the same slug appears in multiple target dirs (e.g. both
-   * ~/.claude/skills/bun and ~/.codex/skills/bun) and the SKILL.md content
-   * is byte-identical, we collapse to one ParsedSkill and list the other
-   * realpaths here. Migrate moves all of them to backup so no stale
-   * non-symlink dirs are left behind.
+   * Realpaths of duplicate copies with byte-identical content. Migrate moves
+   * all of them to backup so no stale non-symlink dirs are left behind.
    */
   additionalSources?: string[];
+  /** Display paths (where the skill was scanned from) for additionalSources. */
+  additionalSourceDisplays?: string[];
   /**
-   * Same situation as `additionalSources` but the content DIFFERS. We keep
-   * the canonical version (whichever target dir has higher priority in
-   * KNOWN_TARGETS) and surface this list in the preview as a warning so
-   * the user knows the conflicting copies will be backed up + replaced.
+   * Realpaths of duplicate copies whose content DIFFERS from the canonical.
+   * We keep the canonical version (whichever target dir has higher priority
+   * in KNOWN_TARGETS) and surface this list in the preview as a warning.
    */
   conflictingSources?: string[];
+  /** Display paths for conflictingSources. */
+  conflictingSourceDisplays?: string[];
   /** Full spec frontmatter, ready to push to Notion. */
   properties: SkillProperties;
 }
@@ -158,8 +158,10 @@ function collapseDuplicateSlugs(input: Classification[]): Classification[] {
     }
 
     canonical.additionalSources = sameContent.map((s) => s.source);
+    canonical.additionalSourceDisplays = sameContent.map((s) => s.sourceDisplay);
     if (differentContent.length > 0) {
       canonical.conflictingSources = differentContent.map((s) => s.source);
+      canonical.conflictingSourceDisplays = differentContent.map((s) => s.sourceDisplay);
     }
     merged.push({ kind: "new", skill: canonical });
   }

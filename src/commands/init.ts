@@ -176,13 +176,13 @@ async function chooseMode(opts: InitOptions): Promise<"global" | "project"> {
     message: "Which scope?",
     choices: [
       {
-        name: "Global — sync to my agent CLIs (~/.claude/skills, etc.)",
+        name: "Global — use skills everywhere (e.g. ~/.claude/skills)",
         value: "global" as const,
       },
       {
         name: inProject
-          ? "Project — overwrite this repo's .notion-skills.json"
-          : "Project — write .notion-skills.json here, commit to share with team",
+          ? "Project — overwrite this project's .notion-skills.json"
+          : "Project — use skills for this project only",
         value: "project" as const,
       },
     ],
@@ -310,11 +310,13 @@ function printLocalSkillPreview(skills: ParsedSkill[]): void {
     const desc = chalk.dim(s.description.slice(0, 60));
     console.log(`  ${chalk.green("•")} ${namePadded} ${chalk.dim(dirs)}`);
     if (desc) console.log(`    ${desc}`);
-    if (s.conflictingSources && s.conflictingSources.length > 0) {
-      const conflicts = s.conflictingSources.map((p) => homeRelative(parentOf(p))).join(", ");
+    if (s.conflictingSourceDisplays && s.conflictingSourceDisplays.length > 0) {
+      const conflicts = s.conflictingSourceDisplays
+        .map((p) => homeRelative(parentOf(p)))
+        .join(", ");
       console.log(
         chalk.yellow(
-          `    ⚠ also exists in ${conflicts} with different content — ${homeRelative(parentOf(s.source))} version will win`,
+          `    ⚠ also exists in ${conflicts} with different content — ${homeRelative(parentOf(s.sourceDisplay))} version will win`,
         ),
       );
     }
@@ -322,13 +324,20 @@ function printLocalSkillPreview(skills: ParsedSkill[]): void {
   console.log("");
 }
 
+/**
+ * Sources are listed by where we SCANNED them (sourceDisplay) rather than
+ * where they ultimately resolve to (realpath). For a symlink at
+ * ~/.claude/skills/foo pointing at ~/.agents/skills/foo, we want users to
+ * see "~/.claude/skills" — the dir under our control, not the deep target
+ * that's incidental to where notion-skills will write.
+ */
 function describeSources(s: ParsedSkill): string {
-  const all = [s.source, ...(s.additionalSources ?? [])];
+  const all = [s.sourceDisplay, ...(s.additionalSourceDisplays ?? [])];
   return all.map((p) => homeRelative(parentOf(p))).join(", ");
 }
 
-function parentOf(realpath: string): string {
-  return dirname(realpath);
+function parentOf(p: string): string {
+  return dirname(p);
 }
 
 function homeRelative(p: string): string {

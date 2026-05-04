@@ -358,26 +358,30 @@ function printClassifications(
 /**
  * Print one skill line in the discovery preview, including which target
  * dirs it was found in and whether any duplicates have conflicting content.
+ *
+ * Paths come from sourceDisplay (where we scanned) not realpath, so users
+ * see the dir they control (e.g. ~/.claude/skills), not whatever deep
+ * symlink target the skill happens to resolve to.
  */
 function printSkillLine(skill: import("../migrate.js").ParsedSkill, mark: string): void {
   const dirs = sourceDirSummary(skill);
   const namePadded = skill.name.padEnd(40);
-  const conflictNote = skill.conflictingSources && skill.conflictingSources.length > 0
+  const conflicts = skill.conflictingSourceDisplays;
+  const conflictNote = conflicts && conflicts.length > 0
     ? chalk.yellow(
-        ` ⚠ also in ${skill.conflictingSources.map(parentDir).map(home).join(", ")} with different content — using ${home(parentDir(skill.source))}`,
+        ` ⚠ also in ${conflicts.map(parentDir).map(home).join(", ")} with different content — using ${home(parentDir(skill.sourceDisplay))}`,
       )
     : "";
   console.log(`  ${chalk.green(mark)} ${namePadded} ${chalk.dim(dirs)}${conflictNote}`);
 }
 
 function sourceDirSummary(skill: import("../migrate.js").ParsedSkill): string {
-  const all = [skill.source, ...(skill.additionalSources ?? [])];
+  const all = [skill.sourceDisplay, ...(skill.additionalSourceDisplays ?? [])];
   return all.map((p) => home(parentDir(p))).join(", ");
 }
 
-function parentDir(realpath: string): string {
-  // /Users/blovin/.claude/skills/bun → /Users/blovin/.claude/skills
-  return dirname(realpath);
+function parentDir(p: string): string {
+  return dirname(p);
 }
 
 function home(p: string): string {
