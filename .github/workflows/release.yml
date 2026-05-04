@@ -1,0 +1,64 @@
+name: Release
+
+# Runs on every push to main. If the package.json version is newer than what's
+# currently published on npm, builds + tests + publishes + creates a GitHub Release.
+# To cut a release: bump `version` in package.json, commit, push.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "package.json"
+      - "src/**"
+      - "test/**"
+      - "tsconfig.json"
+      - "package-lock.json"
+
+jobs:
+  release:
+    name: Publish on version bump
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # needed to create the GitHub Release + tag
+      id-token: write     # for npm provenance
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # so gh release can see history for auto-generated notes
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: node --test test/*.test.mjs
+
+      - name: Publish to npm if version bumped
+        id: publish
+        uses: JS-DevTools/npm-publish@v3
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
+          access: public
+          provenance: true
+
+      - name: Tag and create GitHub Release
+        if: steps.publish.outputs.type
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.publish.outputs.version }}
+        run: |
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --generate-notes
