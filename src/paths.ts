@@ -11,9 +11,6 @@ export const PROJECT_SCOPE_FILENAME = ".notion-skills.json";
 export const PROJECT_LOCK_FILENAME = ".notion-skills.lock";
 export const PROJECT_SKILLS_RELATIVE = ".claude/skills";
 
-export const KNOWN_TARGETS = {
-  claude: { label: "Claude Code", dir: join(HOME, ".claude", "skills") },
-  codex: { label: "Codex CLI", dir: join(HOME, ".codex", "skills") },
-} as const;
-
-export type TargetKey = keyof typeof KNOWN_TARGETS;
+// Target keys are validated against the registry in src/known-targets.ts
+// at runtime. Stored in scope.json's `targets: ["claude", "codex", ...]`.
+export type TargetKey = string;

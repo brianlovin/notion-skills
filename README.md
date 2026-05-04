@@ -1,8 +1,22 @@
 # notion-skills
 
-Sync skills from a Notion database to your AI coding agents — Claude Code, Codex, and beyond.
+Sync skills from a Notion database to your AI coding agents.
 
-Edit your skills in Notion's UI (no git, no markdown editor). Run `notion-skills sync` and they appear in `~/.claude/skills/` ready for `/skill-name` invocation.
+Edit your skills in Notion's UI (no git, no markdown editor). Run `notion-skills sync` and they land in your agent's skills directory ready for `/skill-name` invocation.
+
+## Supported agents
+
+Any of these can be picked as a sync target during `notion-skills init`. Multiple at once is fine — the same skills land in every selected agent's directory.
+
+| Agent | Path | Docs |
+|---|---|---|
+| Claude Code | `~/.claude/skills/` | [code.claude.com](https://code.claude.com/docs/en/skills) |
+| Codex CLI | `~/.codex/skills/` | [openai/codex](https://github.com/openai/codex) |
+| OpenCode | `~/.config/opencode/skills/` | [opencode.ai](https://opencode.ai/docs/skills) |
+| Cursor | `~/.cursor/skills/` | [docs.cursor.com](https://docs.cursor.com) |
+| Gemini CLI | `~/.gemini/skills/` | [geminicli.com](https://geminicli.com/docs/cli/tutorials/skills-getting-started/) |
+
+Adding a new agent is one entry in [`src/known-targets.ts`](src/known-targets.ts) — PRs welcome.
 
 ## Auth: piggybacks on ntn
 

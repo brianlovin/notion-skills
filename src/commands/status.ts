@@ -8,8 +8,8 @@ import {
 } from "../scope.js";
 import { ntnDoctor, ntnVersion } from "../ntn.js";
 import { readManifest } from "../manifest.js";
+import { KNOWN_TARGETS } from "../known-targets.js";
 import {
-  KNOWN_TARGETS,
   MANIFEST_FILE,
   PROJECT_LOCK_FILENAME,
   PROJECT_SKILLS_RELATIVE,
@@ -101,9 +101,9 @@ export async function statusCommand(): Promise<void> {
   console.log("");
 
   console.log(chalk.dim("Known target dirs:"));
-  for (const [, info] of Object.entries(KNOWN_TARGETS)) {
-    const exists = existsSync(info.dir);
-    console.log(chalk.dim(`  ${info.label.padEnd(14)} ${info.dir} ${exists ? "✓" : "○"}`));
+  for (const t of KNOWN_TARGETS) {
+    const exists = existsSync(t.dir);
+    console.log(chalk.dim(`  ${t.label.padEnd(14)} ${t.dir} ${exists ? "✓" : "○"}`));
   }
 }
 

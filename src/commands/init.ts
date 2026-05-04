@@ -7,7 +7,8 @@ import {
   writeProjectScope,
 } from "../scope.js";
 import { detectTargets } from "../targets.js";
-import { KNOWN_TARGETS, type TargetKey } from "../paths.js";
+import { KNOWN_TARGETS } from "../known-targets.js";
+import type { TargetKey } from "../paths.js";
 import { assertNtnInstalled } from "../ntn.js";
 import { parseNotionId } from "../parse-id.js";
 
@@ -245,5 +246,5 @@ async function pickTargets(): Promise<TargetKey[]> {
     validate: (vals) => (vals.length === 0 ? "Pick at least one." : true),
   });
 
-  return picked.length > 0 ? picked : (Object.keys(KNOWN_TARGETS) as TargetKey[]);
+  return picked.length > 0 ? picked : KNOWN_TARGETS.map((t) => t.key);
 }

@@ -22,11 +22,8 @@ import {
   sourceIsInScope,
 } from "../migrate.js";
 import { SCHEMA } from "../schema.js";
-import {
-  KNOWN_TARGETS,
-  PROJECT_SKILLS_RELATIVE,
-  ROOT_DIR,
-} from "../paths.js";
+import { findTargetByKey } from "../known-targets.js";
+import { PROJECT_SKILLS_RELATIVE, ROOT_DIR } from "../paths.js";
 import { runSync, printSummary } from "../sync.js";
 
 interface MigrateOptions {
@@ -49,7 +46,9 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   // Resolve sources.
   const scopeTargetDirs =
     scope.type === "global"
-      ? scope.targets.map((k) => KNOWN_TARGETS[k].dir)
+      ? scope.targets
+          .map((k) => findTargetByKey(k)?.dir)
+          .filter((d): d is string => !!d)
       : [resolve(scope.root, PROJECT_SKILLS_RELATIVE)];
 
   const sourceDirs = resolveSourceDirs(scope.type, {
