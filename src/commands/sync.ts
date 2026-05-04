@@ -1,10 +1,5 @@
 import chalk from "chalk";
-import {
-  findProjectScopePath,
-  readGlobalScope,
-  readProjectScope,
-  type Scope,
-} from "../scope.js";
+import { getScope, type Scope } from "../scope.js";
 import { printSummary, runSync } from "../sync.js";
 
 interface SyncOptions {
@@ -39,44 +34,23 @@ export async function syncCommand(
 }
 
 async function resolveScopes(opts: SyncOptions): Promise<Scope[]> {
-  const scopes: Scope[] = [];
-
   if (opts.all) {
-    const g = await readGlobalScope();
-    if (g) scopes.push(g);
-    const projPath = findProjectScopePath(process.cwd());
-    if (projPath) {
-      const p = await readProjectScope(projPath);
-      if (p) scopes.push(p);
-    }
-    return scopes;
+    const out: Scope[] = [];
+    const g = await getScope({ prefer: "global" });
+    if (g) out.push(g);
+    const p = await getScope({ prefer: "project" });
+    if (p) out.push(p);
+    return out;
   }
-
   if (opts.global) {
-    const g = await readGlobalScope();
-    if (g) scopes.push(g);
-    return scopes;
+    const g = await getScope({ prefer: "global" });
+    return g ? [g] : [];
   }
-
   if (opts.project) {
-    const projPath = findProjectScopePath(process.cwd());
-    if (projPath) {
-      const p = await readProjectScope(projPath);
-      if (p) scopes.push(p);
-    }
-    return scopes;
+    const p = await getScope({ prefer: "project" });
+    return p ? [p] : [];
   }
-
-  // Auto-detect: prefer project if found, else global.
-  const projPath = findProjectScopePath(process.cwd());
-  if (projPath) {
-    const p = await readProjectScope(projPath);
-    if (p) {
-      scopes.push(p);
-      return scopes;
-    }
-  }
-  const g = await readGlobalScope();
-  if (g) scopes.push(g);
-  return scopes;
+  // Auto-detect (project takes precedence when present).
+  const s = await getScope();
+  return s ? [s] : [];
 }

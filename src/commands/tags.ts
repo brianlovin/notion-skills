@@ -3,16 +3,13 @@ import { checkbox } from "@inquirer/prompts";
 import { NotionClient, findMultiSelectProperty } from "../notion.js";
 import { assertNtnInstalled } from "../ntn.js";
 import {
-  findProjectScopePath,
-  readGlobalScope,
-  readProjectScope,
+  getScope,
   writeGlobalScope,
   writeProjectScope,
-  type Scope,
 } from "../scope.js";
 
 export async function tagsCommand(): Promise<void> {
-  const scope = await currentScope();
+  const scope = await getScope();
   if (!scope) {
     throw new Error("No scope configured. Run `notion-skills init` first.");
   }
@@ -79,8 +76,3 @@ export async function tagsCommand(): Promise<void> {
   console.log(`Run ${chalk.bold("notion-skills sync")} to apply.`);
 }
 
-async function currentScope(): Promise<Scope | null> {
-  const projPath = findProjectScopePath(process.cwd());
-  if (projPath) return readProjectScope(projPath);
-  return readGlobalScope();
-}

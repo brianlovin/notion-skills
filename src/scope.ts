@@ -54,7 +54,31 @@ export function findProjectScopePath(startDir: string): string | null {
 
 // ---------- read ----------
 
-export async function readGlobalScope(): Promise<GlobalScope | null> {
+/**
+ * Load the active scope. Auto-detects: if there's a `.notion-skills.json`
+ * in or above `cwd`, that's the project scope; otherwise the global scope
+ * at `~/.notion-skills/scope.json` (or null if neither exists).
+ *
+ * Pass `prefer: "global"` or `prefer: "project"` to force a particular
+ * scope. `prefer: "project"` returns null if cwd isn't inside a repo with
+ * a `.notion-skills.json`.
+ */
+export async function getScope(
+  opts: { prefer?: "global" | "project"; cwd?: string } = {},
+): Promise<Scope | null> {
+  const cwd = opts.cwd ?? process.cwd();
+  if (opts.prefer === "global") return readGlobal();
+  if (opts.prefer === "project") {
+    const path = findProjectScopePath(cwd);
+    return path ? readProject(path) : null;
+  }
+  // Auto-detect: project takes precedence when present.
+  const projectPath = findProjectScopePath(cwd);
+  if (projectPath) return readProject(projectPath);
+  return readGlobal();
+}
+
+async function readGlobal(): Promise<GlobalScope | null> {
   const raw = await readJson<RawScope>(SCOPE_FILE);
   if (!raw) return null;
   return {
@@ -68,9 +92,7 @@ export async function readGlobalScope(): Promise<GlobalScope | null> {
   };
 }
 
-export async function readProjectScope(
-  scopePath: string,
-): Promise<ProjectScope | null> {
+async function readProject(scopePath: string): Promise<ProjectScope | null> {
   const raw = await readJson<RawScope>(scopePath);
   if (!raw) return null;
   return {
@@ -82,27 +104,6 @@ export async function readProjectScope(
     root: dirname(scopePath),
     path: scopePath,
   };
-}
-
-// ---------- resolve ----------
-
-export interface ResolveOptions {
-  global?: boolean;
-  project?: boolean;
-  cwd?: string;
-}
-
-export async function resolveScope(opts: ResolveOptions = {}): Promise<Scope | null> {
-  const cwd = opts.cwd ?? process.cwd();
-  if (opts.global) return readGlobalScope();
-  if (opts.project) {
-    const path = findProjectScopePath(cwd);
-    return path ? readProjectScope(path) : null;
-  }
-  // Auto-detect
-  const projectPath = findProjectScopePath(cwd);
-  if (projectPath) return readProjectScope(projectPath);
-  return readGlobalScope();
 }
 
 // ---------- write ----------

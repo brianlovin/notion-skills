@@ -3,12 +3,7 @@ import { existsSync, lstatSync, readlinkSync, readdirSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { confirm } from "@inquirer/prompts";
-import {
-  findProjectScopePath,
-  readGlobalScope,
-  readProjectScope,
-  type Scope,
-} from "../scope.js";
+import { getScope, type Scope } from "../scope.js";
 import { ntnDoctor, ntnVersion } from "../ntn.js";
 import { readManifest } from "../manifest.js";
 import {
@@ -40,7 +35,7 @@ export async function doctorCommand(opts: DoctorOptions): Promise<void> {
   checks.push(...(await checkNtn()));
 
   // 2. Scope
-  const scope = await currentScope();
+  const scope = await getScope();
   if (!scope) {
     checks.push({
       status: "fail",
@@ -294,12 +289,6 @@ async function checkSymlinks(scope: Scope): Promise<CheckResult[]> {
 }
 
 // ---------- helpers ----------
-
-async function currentScope(): Promise<Scope | null> {
-  const projPath = findProjectScopePath(process.cwd());
-  if (projPath) return readProjectScope(projPath);
-  return readGlobalScope();
-}
 
 function printAndExit(checks: CheckResult[]): void {
   console.log(chalk.bold("notion-skills doctor"));

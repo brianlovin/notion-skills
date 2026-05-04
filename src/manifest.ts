@@ -1,20 +1,17 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 
 export interface ManifestEntry {
   page_id: string;
+  /** Edited timestamp from the Notion API; covers content-block changes. */
   last_edited_time: string;
-  /** Hash of the rendered SKILL.md content. */
-  hash: string;
-  tags: string[];
-  description: string;
   /**
-   * Hash of all spec properties (description + tags + when_to_use + ... etc).
+   * Hash of all spec properties (description + tags + when_to_use + ...).
    * Notion does NOT bump last_edited_time for property-only edits, so we
-   * compare this hash on every sync to detect property changes.
+   * compare this hash on every sync to detect those.
    */
-  props_hash?: string;
+  props_hash: string;
 }
 
 export interface Manifest {
@@ -45,13 +42,34 @@ export async function readManifest(file: string): Promise<Manifest | null> {
   }
 }
 
+/**
+ * Atomic write: serialise to a sibling .tmp file, fsync-after-rename via
+ * the kernel's atomic-replace semantics. A crash mid-write leaves either
+ * the previous manifest or the new one — never a half-written file.
+ */
 export async function writeManifest(file: string, manifest: Manifest): Promise<void> {
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+  const tmp = file + ".tmp";
+  await writeFile(tmp, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+  await rename(tmp, file);
 }
 
 export function hashContent(body: string): string {
   return createHash("sha256").update(body).digest("hex").slice(0, 16);
+}
+
+/**
+ * Lightweight identity test before we trust an old entry. Older manifests
+ * may be missing props_hash entirely — those count as "needs refetch".
+ */
+function entryMatches(
+  old: ManifestEntry,
+  current: { lastEditedTime: string; propsHash: string },
+): boolean {
+  return (
+    old.last_edited_time === current.lastEditedTime &&
+    old.props_hash === current.propsHash
+  );
 }
 
 export interface DiffResult {
@@ -82,17 +100,7 @@ export function diffManifest(
 
   for (const c of current) {
     const old = oldManifest.skills[c.name];
-    if (!old || old.page_id !== c.pageId) {
-      toFetch.push(c.pageId);
-      continue;
-    }
-    // last_edited_time covers content-block changes; props_hash covers
-    // property-only edits which Notion silently fails to surface in
-    // last_edited_time.
-    if (
-      old.last_edited_time !== c.lastEditedTime ||
-      old.props_hash !== c.propsHash
-    ) {
+    if (!old || old.page_id !== c.pageId || !entryMatches(old, c)) {
       toFetch.push(c.pageId);
     } else {
       unchanged.push(c.name);

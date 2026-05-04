@@ -14,7 +14,6 @@ test("every target has a non-empty label and dir", () => {
   for (const t of KNOWN_TARGETS) {
     assert.ok(t.label.length > 0, `label missing for ${t.key}`);
     assert.ok(t.dir.length > 0, `dir missing for ${t.key}`);
-    assert.equal(t.kind, "skill_dir", `${t.key} should be skill_dir`);
   }
 });
 

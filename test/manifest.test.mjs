@@ -11,17 +11,11 @@ const baseManifest = () => ({
     foo: {
       page_id: "p-foo",
       last_edited_time: "2026-01-01T00:00:00.000Z",
-      hash: "abc",
-      tags: ["tooling"],
-      description: "Foo desc",
       props_hash: FOO_HASH,
     },
     bar: {
       page_id: "p-bar",
       last_edited_time: "2026-01-01T00:00:00.000Z",
-      hash: "def",
-      tags: [],
-      description: "Bar desc",
       props_hash: BAR_HASH,
     },
   },

@@ -7,8 +7,7 @@ test("translates ntn auth failure", () => {
     new Error("Public API request failed: API token is invalid."),
   );
   assert.match(f.summary, /auth/i);
-  assert.ok(f.recovery, "recovery should be offered");
-  assert.match(f.recovery.label, /ntn login/);
+  assert.match(f.suggest, /ntn login/);
 });
 
 test("translates schema-type mismatch", () => {
@@ -16,8 +15,7 @@ test("translates schema-type mismatch", () => {
     new Error("validation_error: Tags is expected to be select."),
   );
   assert.match(f.summary, /schema/i);
-  assert.ok(f.recovery, "recovery should be offered");
-  assert.match(f.recovery.label, /upgrade/);
+  assert.match(f.suggest, /upgrade/);
 });
 
 test("translates archived page", () => {
@@ -25,15 +23,14 @@ test("translates archived page", () => {
     new Error("Can't edit block that is archived. You must unarchive..."),
   );
   assert.match(f.summary, /trash/i);
-  // No automated recovery — user has to click in Notion.
-  assert.equal(f.recovery, undefined);
+  // No automated suggestion — user has to fix in Notion UI.
+  assert.equal(f.suggest, undefined);
 });
 
-test("translates 'no scope' into init recovery", () => {
+test("translates 'no scope' into init suggestion", () => {
   const f = translateError(new Error("No scope configured. Run init first."));
   assert.match(f.summary, /(not configured|isn't configured)/i);
-  assert.ok(f.recovery);
-  assert.match(f.recovery.label, /init/);
+  assert.match(f.suggest, /init/);
 });
 
 test("translates network failure", () => {
@@ -55,7 +52,7 @@ test("preserves raw message even when translated", () => {
 test("falls through unmatched errors as-is", () => {
   const f = translateError(new Error("Some unexpected error xyz"));
   assert.equal(f.summary, "Some unexpected error xyz");
-  assert.equal(f.recovery, undefined);
+  assert.equal(f.suggest, undefined);
 });
 
 test("handles non-Error values", () => {

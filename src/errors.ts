@@ -1,33 +1,28 @@
 /**
  * Error translation: turn raw exceptions from ntn / Notion / our internals
- * into human-readable messages with optional auto-run recovery actions.
+ * into human-readable messages with optional recovery hints.
  *
  * Pattern matching is keyed off the message text rather than instanceof
  * checks because errors cross language and process boundaries (ntn shells
  * out, Notion returns JSON, we wrap with our own classes). The matchers
- * are dumb regexes — when they fire, the original error message is shown
+ * are dumb regexes — when they fire, the original message is shown
  * alongside the friendly version so we never hide context.
+ *
+ * Recoveries are PRINTED, not executed. Spawning a re-entrant CLI from
+ * inside a failing command was clever; printing the command the user can
+ * type is dumb and obviously correct.
  */
 
 import chalk from "chalk";
-import { confirm } from "@inquirer/prompts";
-
-export interface RecoveryAction {
-  /** Short label rendered as `Run X? [Y/n]`. */
-  label: string;
-  /** Function that performs the recovery, typically by invoking another
-   *  command. Throws on failure. */
-  run: () => Promise<void>;
-}
 
 export interface FriendlyError {
   /** One-line summary of what went wrong. */
   summary: string;
   /** Optional second line: how to fix or why it happened. */
   detail?: string;
-  /** Optional recovery action the user can opt into. */
-  recovery?: RecoveryAction;
-  /** Always preserve the original message so we never hide context. */
+  /** Suggested next command for the user to type. */
+  suggest?: string;
+  /** Original message, preserved for debugging. */
   raw: string;
 }
 
@@ -41,49 +36,26 @@ const PATTERNS: Pattern[] = [
     match: (t) => /API token is invalid/i.test(t) || /NtnAuthError/.test(t),
     build: () => ({
       summary: "Notion auth has expired or `ntn` isn't logged in.",
-      detail: "Your `ntn` session needs to be refreshed.",
-      recovery: {
-        label: "Run `ntn login` now",
-        run: async () => {
-          const { spawn } = await import("node:child_process");
-          await new Promise<void>((resolve, reject) => {
-            const child = spawn("ntn", ["login"], {
-              stdio: "inherit",
-              env: process.env,
-            });
-            child.on("error", reject);
-            child.on("close", (code) =>
-              code === 0 ? resolve() : reject(new Error(`ntn login exit ${code}`)),
-            );
-          });
-        },
-      },
+      suggest: "ntn login",
     }),
   },
   {
     match: (t) => /ntn` is not installed/i.test(t) || /NtnNotInstalledError/.test(t),
     build: () => ({
       summary: "`ntn` isn't installed.",
-      detail:
-        "notion-skills uses Notion's official CLI for API access.\n" +
-        "Install: https://github.com/makenotion/ntn-cli",
+      detail: "notion-skills uses Notion's official CLI for API access.",
+      suggest: "Install: https://github.com/makenotion/ntn-cli",
     }),
   },
   {
     match: (t) =>
       /is expected to be (select|rich_text|checkbox|multi_select|title)/i.test(t),
     build: () => ({
-      summary: "The Notion database schema doesn't match what notion-skills expects.",
+      summary: "Notion's database schema doesn't match what notion-skills expects.",
       detail:
         "A property's type is different in Notion than in our schema. " +
         "This usually happens after upgrading the CLI.",
-      recovery: {
-        label: "Run `notion-skills upgrade` to reconcile the schema",
-        run: async () => {
-          const { upgradeCommand } = await import("./commands/upgrade.js");
-          await upgradeCommand();
-        },
-      },
+      suggest: "notion-skills upgrade",
     }),
   },
   {
@@ -113,35 +85,14 @@ const PATTERNS: Pattern[] = [
     match: (t) => /No scope configured/i.test(t),
     build: () => ({
       summary: "notion-skills isn't configured yet.",
-      recovery: {
-        label: "Run `notion-skills init` now",
-        run: async () => {
-          const { initCommand } = await import("./commands/init.js");
-          await initCommand({});
-        },
-      },
+      suggest: "notion-skills init",
     }),
   },
   {
     match: (t) => /Not logged in/i.test(t),
     build: () => ({
       summary: "Not logged in to Notion.",
-      recovery: {
-        label: "Run `ntn login` now",
-        run: async () => {
-          const { spawn } = await import("node:child_process");
-          await new Promise<void>((resolve, reject) => {
-            const child = spawn("ntn", ["login"], {
-              stdio: "inherit",
-              env: process.env,
-            });
-            child.on("error", reject);
-            child.on("close", (code) =>
-              code === 0 ? resolve() : reject(new Error(`ntn login exit ${code}`)),
-            );
-          });
-        },
-      },
+      suggest: "ntn login",
     }),
   },
 ];
@@ -157,11 +108,10 @@ export function translateError(err: unknown): FriendlyError {
 }
 
 /**
- * Print a translated error to stderr. If a recovery action is available
- * and stdin is a TTY, prompt the user to run it. Returns the desired
- * process exit code (0 if recovery succeeded, 1 otherwise).
+ * Print a translated error to stderr. Recovery commands are SUGGESTED,
+ * never executed automatically. Returns 1 (process exit code).
  */
-export async function reportError(err: unknown): Promise<number> {
+export function reportError(err: unknown): number {
   const f = translateError(err);
 
   console.error("");
@@ -171,39 +121,11 @@ export async function reportError(err: unknown): Promise<number> {
       console.error(chalk.dim(`  ${line}`));
     }
   }
-
+  if (f.suggest) {
+    console.error(chalk.dim(`  → ${f.suggest}`));
+  }
   if (f.summary !== f.raw) {
     console.error(chalk.dim(`  (raw: ${f.raw.split("\n")[0]})`));
   }
-
-  if (f.recovery && process.stdin.isTTY) {
-    console.error("");
-    let runIt = false;
-    try {
-      runIt = await confirm({
-        message: f.recovery.label,
-        default: true,
-      });
-    } catch {
-      // User Ctrl-C'd or prompt failed — abort recovery.
-      return 1;
-    }
-    if (runIt) {
-      try {
-        await f.recovery.run();
-        return 0;
-      } catch (recoveryErr) {
-        console.error(chalk.red("Recovery failed:"));
-        console.error(
-          recoveryErr instanceof Error ? recoveryErr.message : recoveryErr,
-        );
-        return 1;
-      }
-    }
-  } else if (f.recovery) {
-    console.error("");
-    console.error(chalk.dim(`Try: ${f.recovery.label}`));
-  }
-
   return 1;
 }

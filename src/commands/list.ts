@@ -9,7 +9,7 @@ import {
 import { assertNtnInstalled } from "../ntn.js";
 import { decide } from "../filter.js";
 import { slugify } from "../convert.js";
-import { findProjectScopePath, readGlobalScope, readProjectScope, type Scope } from "../scope.js";
+import { getScope } from "../scope.js";
 import {
   PROJECT_SKILLS_RELATIVE,
   SKILLS_STORE,
@@ -20,7 +20,7 @@ import { MANIFEST_FILE, PROJECT_LOCK_FILENAME } from "../paths.js";
 const TAGS_PROPERTY = "Tags";
 
 export async function listCommand(): Promise<void> {
-  const scope = await currentScope();
+  const scope = await getScope();
   if (!scope) {
     throw new Error(
       "No scope configured. Run `notion-skills init` first.",
@@ -118,8 +118,3 @@ export async function listCommand(): Promise<void> {
   );
 }
 
-async function currentScope(): Promise<Scope | null> {
-  const projPath = findProjectScopePath(process.cwd());
-  if (projPath) return readProjectScope(projPath);
-  return readGlobalScope();
-}

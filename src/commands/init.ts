@@ -3,8 +3,7 @@ import { checkbox, confirm, input, select } from "@inquirer/prompts";
 import { NotionClient, findMultiSelectProperty } from "../notion.js";
 import {
   findProjectScopePath,
-  readGlobalScope,
-  readProjectScope,
+  getScope,
   writeGlobalScope,
   writeProjectScope,
 } from "../scope.js";
@@ -114,10 +113,7 @@ export async function initCommand(opts: InitOptions): Promise<void> {
  */
 async function runPostInitWizard(opts: { source: "existing" | "new" }): Promise<void> {
   // Reload the scope we just wrote.
-  const projPath = findProjectScopePath(process.cwd());
-  const scope = projPath
-    ? await readProjectScope(projPath)
-    : await readGlobalScope();
+  const scope = await getScope();
   if (!scope) return;
 
   const client = new NotionClient();
@@ -176,9 +172,7 @@ async function runPostInitWizard(opts: { source: "existing" | "new" }): Promise<
     default: true,
   });
   if (doSync) {
-    const reloaded = projPath
-      ? await readProjectScope(projPath)
-      : await readGlobalScope();
+    const reloaded = await getScope();
     if (reloaded) {
       const summary = await runSync(reloaded);
       printSummary(summary);

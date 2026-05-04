@@ -1,16 +1,13 @@
 import chalk from "chalk";
-import ora from "ora";
 import { confirm } from "@inquirer/prompts";
 import { existsSync } from "node:fs";
 import { mkdir, rename } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import {
   findProjectScopePath,
-  readGlobalScope,
-  readProjectScope,
+  getScope,
   writeGlobalScope,
   writeProjectScope,
-  type Scope,
 } from "../scope.js";
 import { NotionClient } from "../notion.js";
 import { assertNtnInstalled, ntnSetPageMarkdown } from "../ntn.js";
@@ -36,7 +33,7 @@ interface MigrateOptions {
 export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   await assertNtnInstalled();
 
-  const scope = await currentScope();
+  const scope = await getScope();
   if (!scope) {
     throw new Error(
       "No scope configured. Run `notion-skills init` first.",
@@ -69,9 +66,9 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
 
   // Conflict detection: query Notion for existing slugs.
   const client = new NotionClient();
-  const queryProgress = ora("Checking Notion for existing skills...").start();
+  process.stdout.write(chalk.dim("Checking Notion for existing skills... "));
   const existing = await client.queryDataSource(scope.data_source_id);
-  queryProgress.succeed(`Notion has ${existing.length} pages.`);
+  console.log(chalk.green("✓") + chalk.dim(` ${existing.length} pages`));
 
   const existingByName = new Map<string, { pageId: string; title: string }>();
   for (const page of existing) {
@@ -127,73 +124,34 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
     }
   }
 
-  // Move local copies to backup before any writes to Notion.
-  //
-  // Only move sources that live INSIDE a configured scope target dir
-  // (e.g. ~/.claude/skills/foo when foo is a real dir authored locally).
-  // Sources that came from --from paths, or sources reached via a symlink
-  // pointing at a different location (e.g. an agent-config repo), are
-  // left untouched — sync's symlink reconciler will repoint the symlink
-  // in the target dir without us needing to mutate the real source.
-  const ts = timestamp();
-  const backupRoot = join(ROOT_DIR, "backup", `migrate-${ts}`);
-  let backupCreated = false;
-
-  for (const c of [...willCreate, ...willOverwrite]) {
-    if (c.kind !== "new" && c.kind !== "conflict") continue;
-    if (!sourceIsInScope(c.skill.source, scopeTargetDirs)) continue;
-
-    if (!backupCreated) {
-      await mkdir(backupRoot, { recursive: true });
-      console.log(chalk.dim(`Backing up local copies to ${backupRoot}`));
-      backupCreated = true;
-    }
-
-    const dest = join(backupRoot, c.skill.name);
-    try {
-      await mkdir(dirname(dest), { recursive: true });
-      await rename(c.skill.source, dest);
-    } catch (err) {
-      console.warn(
-        chalk.yellow(
-          `  ! could not back up ${c.skill.source}: ${(err as Error).message}`,
-        ),
-      );
-    }
-  }
-
   // Self-heal select properties: any agent / model values referenced by
   // the migration that aren't already options on the data source need to
   // be added before the page-create call (Notion rejects unknown options).
   const selfHealing = collectSelfHealingValues([...willCreate, ...willOverwrite]);
   if (selfHealing.size > 0) {
-    const healSpinner = ora("Adding new select options...").start();
-    try {
-      const reports = await client.ensureSelectOptions(
-        scope.data_source_id,
-        selfHealing,
-      );
-      if (reports.length === 0) {
-        healSpinner.stop();
-      } else {
-        healSpinner.succeed("Added select options:");
-        for (const r of reports) {
-          console.log(`  ${chalk.green("+")} ${r.column}: ${r.added.join(", ")}`);
-        }
+    const reports = await client.ensureSelectOptions(
+      scope.data_source_id,
+      selfHealing,
+    );
+    if (reports.length > 0) {
+      console.log(chalk.dim("Added select options:"));
+      for (const r of reports) {
+        console.log(`  ${chalk.green("+")} ${r.column}: ${r.added.join(", ")}`);
       }
-    } catch (err) {
-      healSpinner.fail(`Could not extend select options: ${(err as Error).message}`);
-      throw err;
     }
   }
 
-  // Push to Notion.
-  const created: { name: string; pageId: string }[] = [];
-  const updated: { name: string; pageId: string }[] = [];
+  // ---------- Phase 1: write to Notion ----------
+  //
+  // We do all Notion writes BEFORE touching local files. If a create fails
+  // partway, locals stay intact; the user can re-run migrate after fixing
+  // the underlying issue (the failed skill becomes a no-op since
+  // its slug now exists in Notion as a partial page — caught next run).
+  const created: { name: string; pageId: string; source: string }[] = [];
+  const updated: { name: string; pageId: string; source: string }[] = [];
 
   for (const c of willCreate) {
     if (c.kind !== "new") continue;
-    const spinner = ora(`Creating ${c.skill.name}...`).start();
     try {
       const pageId = await client.createSkillPage(
         scope.data_source_id,
@@ -202,18 +160,17 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
       if (c.skill.body.trim()) {
         await ntnSetPageMarkdown(pageId, c.skill.body);
       }
-      created.push({ name: c.skill.name, pageId });
-      spinner.succeed(`Created ${c.skill.name}`);
+      created.push({ name: c.skill.name, pageId, source: c.skill.source });
+      console.log(`  ${chalk.green("+")} ${c.skill.name}`);
     } catch (err) {
-      spinner.fail(
-        `Failed to create ${c.skill.name}: ${(err as Error).message}`,
+      console.log(
+        `  ${chalk.red("✗")} ${c.skill.name} ${chalk.dim(`(${(err as Error).message.split("\n")[0]})`)}`,
       );
     }
   }
 
   for (const c of willOverwrite) {
     if (c.kind !== "conflict") continue;
-    const spinner = ora(`Overwriting ${c.skill.name}...`).start();
     try {
       await client.updateSkillPageProperties(
         c.existingPageId,
@@ -222,11 +179,48 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
       if (c.skill.body.trim()) {
         await ntnSetPageMarkdown(c.existingPageId, c.skill.body);
       }
-      updated.push({ name: c.skill.name, pageId: c.existingPageId });
-      spinner.succeed(`Overwrote ${c.skill.name}`);
+      updated.push({
+        name: c.skill.name,
+        pageId: c.existingPageId,
+        source: c.skill.source,
+      });
+      console.log(`  ${chalk.cyan("~")} ${c.skill.name}`);
     } catch (err) {
-      spinner.fail(
-        `Failed to overwrite ${c.skill.name}: ${(err as Error).message}`,
+      console.log(
+        `  ${chalk.red("✗")} ${c.skill.name} ${chalk.dim(`(${(err as Error).message.split("\n")[0]})`)}`,
+      );
+    }
+  }
+
+  // ---------- Phase 2: back up local copies whose Notion write succeeded ----------
+  //
+  // Only move sources that live INSIDE a configured scope target dir
+  // (e.g. ~/.claude/skills/foo when foo is a real dir authored locally).
+  // Sources from --from paths or symlinks pointing elsewhere are left
+  // untouched — sync's reconciler handles those without us mutating the
+  // real source.
+  const ts = timestamp();
+  const backupRoot = join(ROOT_DIR, "backup", `migrate-${ts}`);
+  let backupCreated = false;
+
+  for (const result of [...created, ...updated]) {
+    if (!sourceIsInScope(result.source, scopeTargetDirs)) continue;
+
+    if (!backupCreated) {
+      await mkdir(backupRoot, { recursive: true });
+      console.log(chalk.dim(`Backing up local copies to ${backupRoot}`));
+      backupCreated = true;
+    }
+
+    const dest = join(backupRoot, result.name);
+    try {
+      await mkdir(dirname(dest), { recursive: true });
+      await rename(result.source, dest);
+    } catch (err) {
+      console.warn(
+        chalk.yellow(
+          `  ! could not back up ${result.source}: ${(err as Error).message}`,
+        ),
       );
     }
   }
@@ -273,7 +267,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   // Final sync to populate central store + symlinks.
   console.log(chalk.bold(`\nSyncing...`));
   // Reload scope so sync sees the updated filter.
-  const reloaded = await currentScope();
+  const reloaded = await getScope();
   if (!reloaded) throw new Error("scope vanished mid-migration");
   const summary = await runSync(reloaded);
   printSummary(summary);
@@ -336,12 +330,6 @@ function printClassifications(
     }
     console.log("");
   }
-}
-
-async function currentScope(): Promise<Scope | null> {
-  const projPath = findProjectScopePath(process.cwd());
-  if (projPath) return readProjectScope(projPath);
-  return readGlobalScope();
 }
 
 /**

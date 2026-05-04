@@ -1,11 +1,7 @@
 import chalk from "chalk";
 import { existsSync, lstatSync, readlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
-import {
-  findProjectScopePath,
-  readGlobalScope,
-  readProjectScope,
-} from "../scope.js";
+import { getScope } from "../scope.js";
 import { ntnDoctor, ntnVersion } from "../ntn.js";
 import { readManifest } from "../manifest.js";
 import { KNOWN_TARGETS } from "../known-targets.js";
@@ -34,9 +30,9 @@ export async function statusCommand(): Promise<void> {
   }
   console.log("");
 
-  const global = await readGlobalScope();
+  const global = await getScope({ prefer: "global" });
   console.log(chalk.bold("Global scope"));
-  if (global) {
+  if (global && global.type === "global") {
     console.log(`  database: ${global.database_title ?? global.database_id}`);
     console.log(`  targets:  ${global.targets.join(", ") || chalk.dim("(none)")}`);
     const filterDesc = describeFilter(global.filter);
@@ -77,23 +73,20 @@ export async function statusCommand(): Promise<void> {
   }
   console.log("");
 
-  const projPath = findProjectScopePath(process.cwd());
+  const project = await getScope({ prefer: "project" });
   console.log(chalk.bold("Project scope"));
-  if (projPath) {
-    const project = await readProjectScope(projPath);
-    if (project) {
-      console.log(`  config:   ${project.path}`);
-      console.log(`  database: ${project.database_title ?? project.database_id}`);
-      const filterDesc = describeFilter(project.filter);
-      if (filterDesc) console.log(`  filter:   ${filterDesc}`);
-      const manifest = await readManifest(resolve(project.root, PROJECT_LOCK_FILENAME));
-      if (manifest) {
-        const count = Object.keys(manifest.skills).length;
-        console.log(`  synced:   ${count} skills, last ${manifest.last_synced_at}`);
-        console.log(chalk.dim(`    written to ${resolve(project.root, PROJECT_SKILLS_RELATIVE)}`));
-      } else {
-        console.log(chalk.dim("  never synced"));
-      }
+  if (project && project.type === "project") {
+    console.log(`  config:   ${project.path}`);
+    console.log(`  database: ${project.database_title ?? project.database_id}`);
+    const filterDesc = describeFilter(project.filter);
+    if (filterDesc) console.log(`  filter:   ${filterDesc}`);
+    const manifest = await readManifest(resolve(project.root, PROJECT_LOCK_FILENAME));
+    if (manifest) {
+      const count = Object.keys(manifest.skills).length;
+      console.log(`  synced:   ${count} skills, last ${manifest.last_synced_at}`);
+      console.log(chalk.dim(`    written to ${resolve(project.root, PROJECT_SKILLS_RELATIVE)}`));
+    } else {
+      console.log(chalk.dim("  never synced"));
     }
   } else {
     console.log(chalk.dim("  none in current tree"));

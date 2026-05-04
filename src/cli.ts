@@ -86,6 +86,5 @@ program.parseAsync(process.argv).catch(async (err) => {
     process.exit(130);
   }
   const { reportError } = await import("./errors.js");
-  const code = await reportError(err);
-  process.exit(code);
+  process.exit(reportError(err));
 });

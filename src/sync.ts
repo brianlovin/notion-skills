@@ -1,5 +1,4 @@
 import chalk from "chalk";
-import ora from "ora";
 import { existsSync, lstatSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -70,9 +69,9 @@ export async function runSync(
     conflicts: [],
   };
 
-  const spinner = ora(`Querying ${scope.database_title ?? "database"}...`).start();
+  process.stdout.write(chalk.dim(`Querying ${scope.database_title ?? "database"}... `));
   const pages = await client.queryDataSource(scope.data_source_id);
-  spinner.succeed(`Fetched ${pages.length} pages.`);
+  console.log(chalk.green(`✓`) + chalk.dim(` ${pages.length} pages`));
 
   // First pass: derive name + tags + description + edited time without
   // fetching block content. We need the property data here so the manifest
@@ -180,10 +179,7 @@ export async function runSync(
     nextManifest.skills[skillName] = {
       page_id: skill.pageId,
       last_edited_time: skill.lastEditedTime,
-      hash: hashContent(md),
-      tags: skill.properties.tags ?? [],
-      description: skill.properties.description,
-      props_hash: matchingSummary?.propsHash,
+      props_hash: matchingSummary?.propsHash ?? "",
     };
 
     const mark = wasNew ? chalk.green("+") : chalk.cyan("~");
