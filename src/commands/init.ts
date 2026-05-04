@@ -125,12 +125,38 @@ export async function initCommand(opts: InitOptions): Promise<void> {
   }
 
   if (intent === "connect") {
-    // Existing DB usually has content; pull it down.
+    // Existing DB usually has content; pull it down first so the manifest
+    // and central-store know about everything before we look at locals.
     const reloaded = await getScope();
     if (reloaded) {
       const summary = await runSync(reloaded);
       printSummary(summary);
     }
+
+    // If the user ALSO has local skills that aren't in this DB, offer to
+    // upload them. Mostly hits when someone has a personal collection in
+    // ~/.claude/skills/ and just connected to their team's shared DB.
+    if (mode === "global") {
+      const targetDirs = KNOWN_TARGETS.map((t) => t.dir);
+      const found = await discoverSkills({ sourceDirs: targetDirs });
+      const newCount = found.filter((c) => c.kind === "new").length;
+      if (newCount > 0) {
+        console.log("");
+        console.log(
+          chalk.dim(
+            `You also have ${newCount} local skill(s) on disk that aren't in this database.`,
+          ),
+        );
+        const doMigrate = await confirm({
+          message: `Upload them to Notion too?`,
+          default: true,
+        });
+        if (doMigrate) {
+          await migrateCommand({ yes: true });
+        }
+      }
+    }
+
     printDoneBanner({ intent, databaseUrl });
     return;
   }
