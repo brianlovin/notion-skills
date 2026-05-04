@@ -374,6 +374,23 @@ Source layout:
 
 Adding a new agent: append a `TargetDef` to `KNOWN_TARGETS` in `src/known-targets.ts`. Tests in `test/known-targets.test.mjs` will pin the change.
 
+PRs run `Build + test` against Node 18 / 20 / 22 on Ubuntu via [`.github/workflows/test.yml`](.github/workflows/test.yml). All checks must pass before merge.
+
+## Releasing
+
+Releases are automated. To cut a new version:
+
+```bash
+npm version patch          # 0.1.0 → 0.1.1 (or `minor`, `major`)
+git push --follow-tags
+```
+
+The `Release` workflow on `main` ([`.github/workflows/release.yml`](.github/workflows/release.yml)) detects the version bump in `package.json`, builds, tests, publishes to npm with [provenance](https://docs.npmjs.com/generating-provenance-statements), and creates a GitHub Release with auto-generated notes.
+
+Setup (one-time, already done for this repo):
+1. Generate a Granular Access Token at https://www.npmjs.com/settings/~/tokens with publish access scoped to `@brianlovin/notion-skills`.
+2. Add it to the repo as `NPM_TOKEN`: `gh secret set NPM_TOKEN`.
+
 ## License
 
 MIT

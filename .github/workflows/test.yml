@@ -1,0 +1,44 @@
+name: Test
+
+# Runs build + the full test suite on every PR and on every push to a
+# non-main branch. Pair with branch protection ("Require status checks
+# to pass before merging" → check `Test`) to block merges on red CI.
+
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - main      # main is covered by release.yml; no need to double-run
+
+concurrency:
+  # Cancel in-progress runs when a new commit arrives on the same branch.
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build + test
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node: ["18", "20", "22"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: node --test test/*.test.mjs
