@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse as yamlParse } from "yaml";
 import { slugify, splitToolsRespectingParens } from "./convert.js";
+import { KNOWN_TARGETS } from "./known-targets.js";
 import type { SkillProperties } from "./notion.js";
 import { SKILLS_STORE } from "./paths.js";
 
@@ -11,8 +13,23 @@ export interface ParsedSkill {
   title: string;         // raw frontmatter name or dir name
   description: string;
   body: string;          // markdown body, frontmatter stripped
-  source: string;        // realpath to skill dir
-  sourceDisplay: string; // human-friendly path (link path, not realpath)
+  source: string;        // realpath to canonical skill dir
+  sourceDisplay: string; // human-friendly canonical path
+  /**
+   * If the same slug appears in multiple target dirs (e.g. both
+   * ~/.claude/skills/bun and ~/.codex/skills/bun) and the SKILL.md content
+   * is byte-identical, we collapse to one ParsedSkill and list the other
+   * realpaths here. Migrate moves all of them to backup so no stale
+   * non-symlink dirs are left behind.
+   */
+  additionalSources?: string[];
+  /**
+   * Same situation as `additionalSources` but the content DIFFERS. We keep
+   * the canonical version (whichever target dir has higher priority in
+   * KNOWN_TARGETS) and surface this list in the preview as a warning so
+   * the user knows the conflicting copies will be backed up + replaced.
+   */
+  conflictingSources?: string[];
   /** Full spec frontmatter, ready to push to Notion. */
   properties: SkillProperties;
 }
@@ -31,6 +48,9 @@ export interface DiscoverOptions {
 }
 
 export async function discoverSkills(opts: DiscoverOptions): Promise<Classification[]> {
+  // Pass 1: walk every source dir and produce one classification per
+  // realpath we haven't already seen. Same-realpath dedup handles symlinks
+  // pointing at the same target.
   const out: Classification[] = [];
   const seenRealpaths = new Set<string>();
 
@@ -65,7 +85,6 @@ export async function discoverSkills(opts: DiscoverOptions): Promise<Classificat
       if (seenRealpaths.has(realpath)) continue;
       seenRealpaths.add(realpath);
 
-      // Must be a directory.
       try {
         if (!lstatSync(realpath).isDirectory()) {
           out.push({ kind: "invalid", sourceDisplay, reason: "not a directory" });
@@ -91,7 +110,71 @@ export async function discoverSkills(opts: DiscoverOptions): Promise<Classificat
     }
   }
 
-  return out;
+  // Pass 2: collapse any "new" classifications that share the same slug.
+  //
+  // Two scenarios:
+  //   - Same content (hash equal) → collapse to one canonical, record other
+  //     paths in additionalSources. Migrate will back them ALL up.
+  //   - Different content → collapse to one canonical, record losers in
+  //     conflictingSources for a warning + backup.
+  //
+  // Canonical pick is by KNOWN_TARGETS order (claude beats codex etc.) so
+  // the choice is deterministic and matches user intuition: "the one your
+  // primary agent reads from wins".
+  return collapseDuplicateSlugs(out);
+}
+
+function collapseDuplicateSlugs(input: Classification[]): Classification[] {
+  const news = input.filter(
+    (c): c is { kind: "new"; skill: ParsedSkill } => c.kind === "new",
+  );
+  const others = input.filter((c) => c.kind !== "new");
+
+  const groups = new Map<string, ParsedSkill[]>();
+  for (const c of news) {
+    const list = groups.get(c.skill.name) ?? [];
+    list.push(c.skill);
+    groups.set(c.skill.name, list);
+  }
+
+  const merged: Classification[] = [...others];
+  for (const [, group] of groups) {
+    if (group.length === 1) {
+      merged.push({ kind: "new", skill: group[0]! });
+      continue;
+    }
+    // Sort by KNOWN_TARGETS priority — earlier in the registry wins.
+    const ordered = [...group].sort(
+      (a, b) => priorityOf(a.source) - priorityOf(b.source),
+    );
+    const canonical = ordered[0]!;
+    const canonicalHash = hashBody(canonical.body);
+
+    const sameContent: ParsedSkill[] = [];
+    const differentContent: ParsedSkill[] = [];
+    for (const s of ordered.slice(1)) {
+      if (hashBody(s.body) === canonicalHash) sameContent.push(s);
+      else differentContent.push(s);
+    }
+
+    canonical.additionalSources = sameContent.map((s) => s.source);
+    if (differentContent.length > 0) {
+      canonical.conflictingSources = differentContent.map((s) => s.source);
+    }
+    merged.push({ kind: "new", skill: canonical });
+  }
+  return merged;
+}
+
+function priorityOf(realpath: string): number {
+  for (let i = 0; i < KNOWN_TARGETS.length; i++) {
+    if (realpath.startsWith(KNOWN_TARGETS[i]!.dir)) return i;
+  }
+  return KNOWN_TARGETS.length; // unknown source dirs sort last
+}
+
+function hashBody(body: string): string {
+  return createHash("sha256").update(body).digest("hex");
 }
 
 // ---------- frontmatter ----------

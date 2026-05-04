@@ -147,8 +147,22 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   // partway, locals stay intact; the user can re-run migrate after fixing
   // the underlying issue (the failed skill becomes a no-op since
   // its slug now exists in Notion as a partial page — caught next run).
-  const created: { name: string; pageId: string; source: string }[] = [];
-  const updated: { name: string; pageId: string; source: string }[] = [];
+  //
+  // `sources` collects every realpath that should be moved to backup
+  // when the Notion write succeeds: the canonical source + any
+  // identical-content duplicates + any conflicting copies. We back them
+  // ALL up so no stale non-symlink dirs are left in target dirs.
+  const created: { name: string; pageId: string; sources: string[] }[] = [];
+  const updated: { name: string; pageId: string; sources: string[] }[] = [];
+
+  const allSources = (s: Classification): string[] => {
+    if (s.kind !== "new" && s.kind !== "conflict") return [];
+    return [
+      s.skill.source,
+      ...(s.skill.additionalSources ?? []),
+      ...(s.skill.conflictingSources ?? []),
+    ];
+  };
 
   for (const c of willCreate) {
     if (c.kind !== "new") continue;
@@ -160,7 +174,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
       if (c.skill.body.trim()) {
         await ntnSetPageMarkdown(pageId, c.skill.body);
       }
-      created.push({ name: c.skill.name, pageId, source: c.skill.source });
+      created.push({ name: c.skill.name, pageId, sources: allSources(c) });
       console.log(`  ${chalk.green("+")} ${c.skill.name}`);
     } catch (err) {
       console.log(
@@ -182,7 +196,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
       updated.push({
         name: c.skill.name,
         pageId: c.existingPageId,
-        source: c.skill.source,
+        sources: allSources(c),
       });
       console.log(`  ${chalk.cyan("~")} ${c.skill.name}`);
     } catch (err) {
@@ -204,24 +218,31 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   let backupCreated = false;
 
   for (const result of [...created, ...updated]) {
-    if (!sourceIsInScope(result.source, scopeTargetDirs)) continue;
+    let copyIndex = 0;
+    for (const src of result.sources) {
+      if (!sourceIsInScope(src, scopeTargetDirs)) continue;
 
-    if (!backupCreated) {
-      await mkdir(backupRoot, { recursive: true });
-      console.log(chalk.dim(`Backing up local copies to ${backupRoot}`));
-      backupCreated = true;
-    }
+      if (!backupCreated) {
+        await mkdir(backupRoot, { recursive: true });
+        console.log(chalk.dim(`Backing up local copies to ${backupRoot}`));
+        backupCreated = true;
+      }
 
-    const dest = join(backupRoot, result.name);
-    try {
-      await mkdir(dirname(dest), { recursive: true });
-      await rename(result.source, dest);
-    } catch (err) {
-      console.warn(
-        chalk.yellow(
-          `  ! could not back up ${result.source}: ${(err as Error).message}`,
-        ),
-      );
+      // First source goes to backup/<name>; subsequent ones (multi-target
+      // duplicates) get a numeric suffix so they don't collide.
+      const destName = copyIndex === 0 ? result.name : `${result.name}.${copyIndex}`;
+      const dest = join(backupRoot, destName);
+      try {
+        await mkdir(dirname(dest), { recursive: true });
+        await rename(src, dest);
+      } catch (err) {
+        console.warn(
+          chalk.yellow(
+            `  ! could not back up ${src}: ${(err as Error).message}`,
+          ),
+        );
+      }
+      copyIndex++;
     }
   }
 
@@ -272,9 +293,10 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   const summary = await runSync(reloaded);
   printSummary(summary);
 
+  const totalDone = created.length + updated.length;
   console.log(
     chalk.green(
-      `✓ Migrated ${created.length + updated.length} skill(s).` +
+      `✓ Migrated ${totalDone} ${totalDone === 1 ? "skill" : "skills"}.` +
         (backupCreated ? ` Backup at ${backupRoot}` : ""),
     ),
   );
@@ -294,29 +316,31 @@ function printClassifications(
   console.log(chalk.bold("Found:"));
   console.log(`  new        ${groups.new.length}`);
   console.log(`  conflict   ${groups.conflict.length}${
-    opts.overwrite ? chalk.dim(" (will overwrite)") : chalk.dim(" (will skip; pass --overwrite)")
+    groups.conflict.length === 0
+      ? ""
+      : opts.overwrite
+        ? chalk.dim(" (will overwrite)")
+        : chalk.dim(" (will skip; pass --overwrite)")
   }`);
-  console.log(`  managed    ${groups.managed.length}${chalk.dim(" (already in central store)")}`);
+  console.log(`  managed    ${groups.managed.length}${groups.managed.length === 0 ? "" : chalk.dim(" (already in central store)")}`);
   console.log(`  invalid    ${groups.invalid.length}`);
   console.log("");
 
   if (groups.new.length) {
-    console.log(chalk.bold("New (will create):"));
+    console.log(chalk.bold(`New (will create ${groups.new.length === 1 ? "this skill" : "these skills"}):`));
     for (const c of groups.new) {
-      if (c.kind === "new") {
-        console.log(`  ${chalk.green("+")} ${c.skill.name.padEnd(40)} ${chalk.dim(c.skill.sourceDisplay)}`);
-      }
+      if (c.kind !== "new") continue;
+      printSkillLine(c.skill, "+");
     }
     console.log("");
   }
 
   if (groups.conflict.length) {
-    console.log(chalk.bold("Conflicts:"));
+    console.log(chalk.bold("Conflicts in Notion:"));
     for (const c of groups.conflict) {
-      if (c.kind === "conflict") {
-        const tag = opts.overwrite ? chalk.yellow("~") : chalk.red("!");
-        console.log(`  ${tag} ${c.skill.name.padEnd(40)} ${chalk.dim(`exists in Notion as "${c.existingTitle}"`)}`);
-      }
+      if (c.kind !== "conflict") continue;
+      const tag = opts.overwrite ? chalk.yellow("~") : chalk.red("!");
+      console.log(`  ${tag} ${c.skill.name.padEnd(40)} ${chalk.dim(`exists in Notion as "${c.existingTitle}"`)}`);
     }
     console.log("");
   }
@@ -324,12 +348,41 @@ function printClassifications(
   if (groups.invalid.length) {
     console.log(chalk.bold("Invalid (skipped):"));
     for (const c of groups.invalid) {
-      if (c.kind === "invalid") {
-        console.log(`  ${chalk.dim("·")} ${c.sourceDisplay.padEnd(60)} ${chalk.dim(c.reason)}`);
-      }
+      if (c.kind !== "invalid") continue;
+      console.log(`  ${chalk.dim("·")} ${c.sourceDisplay.padEnd(60)} ${chalk.dim(c.reason)}`);
     }
     console.log("");
   }
+}
+
+/**
+ * Print one skill line in the discovery preview, including which target
+ * dirs it was found in and whether any duplicates have conflicting content.
+ */
+function printSkillLine(skill: import("../migrate.js").ParsedSkill, mark: string): void {
+  const dirs = sourceDirSummary(skill);
+  const namePadded = skill.name.padEnd(40);
+  const conflictNote = skill.conflictingSources && skill.conflictingSources.length > 0
+    ? chalk.yellow(
+        ` ⚠ also in ${skill.conflictingSources.map(parentDir).map(home).join(", ")} with different content — using ${home(parentDir(skill.source))}`,
+      )
+    : "";
+  console.log(`  ${chalk.green(mark)} ${namePadded} ${chalk.dim(dirs)}${conflictNote}`);
+}
+
+function sourceDirSummary(skill: import("../migrate.js").ParsedSkill): string {
+  const all = [skill.source, ...(skill.additionalSources ?? [])];
+  return all.map((p) => home(parentDir(p))).join(", ");
+}
+
+function parentDir(realpath: string): string {
+  // /Users/blovin/.claude/skills/bun → /Users/blovin/.claude/skills
+  return dirname(realpath);
+}
+
+function home(p: string): string {
+  const h = process.env.HOME;
+  return h && p.startsWith(h) ? "~" + p.slice(h.length) : p;
 }
 
 /**

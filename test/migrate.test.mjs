@@ -298,6 +298,45 @@ test("discoverSkills: deduplicates by realpath when same skill is in two dirs", 
   rmSync(root, { recursive: true });
 });
 
+test("discoverSkills: same slug + same content across two real dirs collapses with additionalSources", async () => {
+  // Two REAL dirs (not symlinks) with identical SKILL.md content.
+  // Should collapse to one classification with additionalSources populated.
+  const root = makeFixture();
+  const dirA = join(root, "a");
+  const dirB = join(root, "b");
+  mkdirSync(dirA);
+  mkdirSync(dirB);
+  const fmA = { name: "twin", description: "twins." };
+  writeSkill(dirA, "twin", fmA, "Same body.");
+  writeSkill(dirB, "twin", fmA, "Same body.");
+
+  const results = await discoverSkills({ sourceDirs: [dirA, dirB] });
+  const news = results.filter((r) => r.kind === "new");
+  assert.equal(news.length, 1, "should collapse to one entry");
+  assert.equal(news[0].skill.name, "twin");
+  assert.equal(news[0].skill.additionalSources?.length, 1);
+  assert.equal(news[0].skill.conflictingSources, undefined);
+  rmSync(root, { recursive: true });
+});
+
+test("discoverSkills: same slug + DIFFERENT content flags conflictingSources", async () => {
+  const root = makeFixture();
+  const dirA = join(root, "a");
+  const dirB = join(root, "b");
+  mkdirSync(dirA);
+  mkdirSync(dirB);
+  writeSkill(dirA, "split", { name: "split", description: "first." }, "Body A.");
+  writeSkill(dirB, "split", { name: "split", description: "second." }, "Body B (different).");
+
+  const results = await discoverSkills({ sourceDirs: [dirA, dirB] });
+  const news = results.filter((r) => r.kind === "new");
+  assert.equal(news.length, 1, "should collapse to one canonical entry");
+  // Exactly one extra path, in conflictingSources, NOT in additionalSources.
+  assert.equal(news[0].skill.conflictingSources?.length, 1);
+  assert.deepEqual(news[0].skill.additionalSources ?? [], []);
+  rmSync(root, { recursive: true });
+});
+
 test("discoverSkills: missing source dir is silently skipped", async () => {
   const results = await discoverSkills({
     sourceDirs: ["/path/that/does/not/exist"],

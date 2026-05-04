@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { loginCommand } from "./commands/login.js";
 import { logoutCommand } from "./commands/logout.js";
 import { initCommand } from "./commands/init.js";
@@ -11,12 +14,21 @@ import { migrateCommand } from "./commands/migrate.js";
 import { upgradeCommand } from "./commands/upgrade.js";
 import { doctorCommand } from "./commands/doctor.js";
 
+// Read version from package.json so `--version` stays in sync with bumps
+// without us remembering to edit two places.
+const pkg = JSON.parse(
+  readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"),
+    "utf8",
+  ),
+) as { version: string };
+
 const program = new Command();
 
 program
   .name("notion-skills")
   .description("Sync skills from a Notion database to your AI coding agents.")
-  .version("0.1.0");
+  .version(pkg.version);
 
 program
   .command("login")
