@@ -21,49 +21,67 @@ interface InitOptions {
   project?: boolean;
 }
 
+/**
+ * Three intents a user might bring to `init`. Detected up front so the
+ * rest of the wizard only asks questions that match the user's path.
+ */
+type Intent = "migrate" | "connect" | "fresh";
+
 export async function initCommand(opts: InitOptions): Promise<void> {
   await assertNtnInstalled();
   const client = new NotionClient();
 
+  // ---- 1. Pick scope (global vs project) -------------------------------
   const mode = await chooseMode(opts);
-  const source = await chooseSource();
 
-  const { databaseId, dataSourceId, databaseTitle } =
-    source === "existing"
+  // ---- 2. Look at what's already on disk -------------------------------
+  // Knowing whether the user has local skills BEFORE we ask about Notion
+  // lets us recommend the migrate path when it matches their reality.
+  const localSkillCount = await countLocalSkills(mode);
+
+  // ---- 3. Choose intent ------------------------------------------------
+  const intent = await chooseIntent({ mode, localSkillCount });
+
+  // ---- 4. Connect a database (existing or new) -------------------------
+  const { databaseId, dataSourceId, databaseTitle, databaseUrl } =
+    intent === "connect"
       ? await pickExistingDatabase(client)
       : await createNewDatabase(client);
 
-  // Inspect schema to find Tags multi-select for filtering and validate Description.
-  const dataSource = await client.getDataSource(dataSourceId);
-  validateSchema(dataSource);
-
-  const tagsProp = findMultiSelectProperty(dataSource as any, "Tags");
-  if (!tagsProp) {
+  // ---- 5. Auto-upgrade schema (no warnings; just make it right) --------
+  // The DB might be brand-new (we created it title-only) or an existing
+  // user DB with the old schema. Either way, normalize before going further.
+  console.log(chalk.dim("Reconciling schema..."));
+  const { added, retyped } = await client.upgradeSchema(dataSourceId);
+  if (added.length || retyped.length) {
     console.log(
-      chalk.yellow(
-        `Note: no multi_select property named "Tags" found. Tag filters will be a no-op until you add one in Notion.`,
-      ),
+      chalk.dim(`  added ${added.length}, retyped ${retyped.length}`),
     );
   }
 
-  const includeTags = tagsProp && tagsProp.options.length
-    ? await checkbox({
-        message: "Include tags (leave empty to include all):",
-        choices: tagsProp.options.map((t) => ({ name: t, value: t })),
-        required: false,
-      })
-    : [];
+  // ---- 6. Tag filter (optional, only when DB has Tags w/ options) ------
+  const dataSource = await client.getDataSource(dataSourceId);
+  const tagsProp = findMultiSelectProperty(dataSource as any, "Tags");
+  const includeTags =
+    tagsProp && tagsProp.options.length
+      ? await checkbox({
+          message: "Include tags (leave empty for all):",
+          choices: tagsProp.options.map((t) => ({ name: t, value: t })),
+          required: false,
+        })
+      : [];
+  const excludeTags =
+    tagsProp && tagsProp.options.length && includeTags.length === 0
+      ? await checkbox({
+          message: "Exclude tags (leave empty for none):",
+          choices: tagsProp.options
+            .filter((t) => !includeTags.includes(t))
+            .map((t) => ({ name: t, value: t })),
+          required: false,
+        })
+      : [];
 
-  const excludeTags = tagsProp && tagsProp.options.length && includeTags.length === 0
-    ? await checkbox({
-        message: "Exclude tags (leave empty for none):",
-        choices: tagsProp.options
-          .filter((t) => !includeTags.includes(t))
-          .map((t) => ({ name: t, value: t })),
-        required: false,
-      })
-    : [];
-
+  // ---- 7. Persist scope ------------------------------------------------
   if (mode === "global") {
     const targets = await pickTargets();
     await writeGlobalScope({
@@ -73,14 +91,12 @@ export async function initCommand(opts: InitOptions): Promise<void> {
       targets,
       filter: { include_tags: includeTags, exclude_tags: excludeTags },
     });
-    console.log(
-      chalk.green(`\n✓ Saved global scope. Targets: ${targets.join(", ")}.`),
-    );
+    console.log(chalk.green(`✓ Saved global scope (targets: ${targets.join(", ")})`));
   } else {
     const cwd = process.cwd();
     if (findProjectScopePath(cwd)) {
       const ok = await confirm({
-        message: ".notion-skills.json already exists in this tree. Overwrite?",
+        message: ".notion-skills.json already exists here. Overwrite?",
         default: false,
       });
       if (!ok) {
@@ -94,99 +110,45 @@ export async function initCommand(opts: InitOptions): Promise<void> {
       database_title: databaseTitle,
       filter: { include_tags: includeTags, exclude_tags: excludeTags },
     });
-    console.log(chalk.green(`\n✓ Saved project scope at ${path}.`));
-    console.log(chalk.dim(`  commit ${PROJECT_SCOPE_FILENAME} so teammates get the same skills.`));
-  }
-
-  // Chain into upgrade / migrate / sync as needed. Each step is opt-in.
-  await runPostInitWizard({ source });
-}
-
-/**
- * After a scope is saved, walk the user through the remaining setup steps
- * conditionally:
- *   1. Schema upgrade if Notion's columns are missing/wrong
- *   2. Migrate local skills if they exist on disk and aren't in Notion yet
- *   3. Sync if there's anything to pull down
- *
- * Each prompt defaults to Y so repeat-Enter takes the happy path.
- */
-async function runPostInitWizard(opts: { source: "existing" | "new" }): Promise<void> {
-  // Reload the scope we just wrote.
-  const scope = await getScope();
-  if (!scope) return;
-
-  const client = new NotionClient();
-
-  // --- Step 1: schema upgrade -----------------------------------------
-  console.log(chalk.dim("\nChecking Notion schema..."));
-  const { added, retyped } = await client.upgradeSchema(scope.data_source_id);
-  if (added.length === 0 && retyped.length === 0) {
-    console.log(chalk.dim("  Schema up to date."));
-  } else {
+    console.log(chalk.green(`✓ Saved project scope at ${path}`));
     console.log(
-      chalk.green(
-        `  ✓ Upgraded schema: ${added.length} added, ${retyped.length} retyped`,
-      ),
+      chalk.dim(`  commit ${PROJECT_SCOPE_FILENAME} so teammates get the same skills.`),
     );
   }
 
-  // --- Step 2: discover and offer to migrate local skills -------------
-  // Skip for project scope (a fresh repo is unlikely to have local skills
-  // worth uploading). Skip when DB was just created — there's nothing to
-  // conflict with, but the discover/migrate loop reuses the migrate
-  // command anyway, so we just always run it for global.
-  if (scope.type === "global") {
-    const sourceDirs = scope.targets
-      .map((k) => findTargetByKey(k)?.dir)
-      .filter((d): d is string => !!d);
-
-    const found = await discoverSkills({ sourceDirs });
-    const newCount = found.filter((c) => c.kind === "new").length;
-
-    if (newCount > 0) {
-      console.log(
-        chalk.dim(
-          `\nFound ${newCount} local skill(s) on disk not yet in Notion.`,
-        ),
-      );
-      const doMigrate = await confirm({
-        message: `Migrate them into Notion?`,
-        default: true,
-      });
-      if (doMigrate) {
-        await migrateCommand({ yes: true });
-        // migrate runs its own sync at the end, so step 3 becomes a no-op.
-        printNextSteps();
-        return;
-      }
-    }
+  // ---- 8. Branch on intent for the post-setup action -------------------
+  if (intent === "migrate") {
+    console.log(chalk.bold(`\nMigrating ${localSkillCount} local skill(s) to Notion...`));
+    await migrateCommand({ yes: true });
+    printDoneBanner({ intent, databaseUrl });
+    return;
   }
 
-  // --- Step 3: offer initial sync -------------------------------------
-  // For "existing" DBs we likely have content to pull down. For "new"
-  // DBs the sync is a no-op but it's still worth running so the manifest
-  // gets initialised.
-  const doSync = await confirm({
-    message: opts.source === "new" ? "Run an initial (empty) sync?" : "Pull skills from Notion now?",
-    default: true,
-  });
-  if (doSync) {
+  if (intent === "connect") {
+    // Existing DB usually has content; pull it down.
     const reloaded = await getScope();
     if (reloaded) {
       const summary = await runSync(reloaded);
       printSummary(summary);
     }
+    printDoneBanner({ intent, databaseUrl });
+    return;
   }
-  printNextSteps();
+
+  // intent === "fresh": empty DB. Don't bother with sync; tell the user to
+  // open the DB and start authoring.
+  printDoneBanner({ intent, databaseUrl });
 }
 
-function printNextSteps(): void {
-  console.log("");
-  console.log(chalk.green("✓ Setup complete."));
-  console.log(chalk.dim("  · `notion-skills sync` to pull updates"));
-  console.log(chalk.dim("  · `notion-skills doctor` if anything looks off"));
-  console.log(chalk.dim("  · `notion-skills tags` to refine your filter"));
+// ---------- helpers ----------
+
+async function countLocalSkills(mode: "global" | "project"): Promise<number> {
+  // For project scope we don't preempt with migration suggestions —
+  // a fresh repo cwd is unlikely to already have skills.
+  if (mode === "project") return 0;
+  const dirs = KNOWN_TARGETS.map((t) => t.dir);
+  const found = await discoverSkills({ sourceDirs: dirs });
+  return found.filter((c) => c.kind === "new").length;
 }
 
 async function chooseMode(opts: InitOptions): Promise<"global" | "project"> {
@@ -201,61 +163,97 @@ async function chooseMode(opts: InitOptions): Promise<"global" | "project"> {
     message: "Which scope?",
     choices: [
       {
-        name: "Global (sync to ~/.claude/skills, ~/.codex/skills)",
+        name: "Global — sync to my agent CLIs (~/.claude/skills, etc.)",
         value: "global" as const,
       },
       {
         name: inProject
-          ? "Project (overwrite this repo's .notion-skills.json)"
-          : "Project (write .notion-skills.json here, commit to share with team)",
+          ? "Project — overwrite this repo's .notion-skills.json"
+          : "Project — write .notion-skills.json here, commit to share with team",
         value: "project" as const,
       },
     ],
   });
 }
 
-async function chooseSource(): Promise<"existing" | "new"> {
+async function chooseIntent(args: {
+  mode: "global" | "project";
+  localSkillCount: number;
+}): Promise<Intent> {
+  const { mode, localSkillCount } = args;
+  const hasLocals = mode === "global" && localSkillCount > 0;
+
+  if (hasLocals) {
+    console.log("");
+    console.log(
+      chalk.dim(
+        `Found ${localSkillCount} skill(s) on this machine. notion-skills can upload them to Notion so they become editable in your browser.`,
+      ),
+    );
+    console.log("");
+  }
+
+  const choices: { name: string; value: Intent }[] = [];
+  if (hasLocals) {
+    choices.push({
+      name: `Migrate my ${localSkillCount} local skill(s) to Notion (recommended)`,
+      value: "migrate",
+    });
+  }
+  choices.push({
+    name: "Connect to an existing Notion database",
+    value: "connect",
+  });
+  choices.push({
+    name: hasLocals
+      ? "Start fresh — create an empty database and ignore my local skills"
+      : "Create a new empty Skills database",
+    value: "fresh",
+  });
+
   return select({
-    message: "Where are your skills coming from?",
-    choices: [
-      {
-        name: "I have an existing Notion database — paste its URL or ID",
-        value: "existing" as const,
-      },
-      {
-        name: "Create a fresh Skills database under a parent page",
-        value: "new" as const,
-      },
-    ],
+    message: "What do you want to do?",
+    choices,
   });
 }
 
 async function pickExistingDatabase(client: NotionClient): Promise<{
   databaseId: string;
   dataSourceId: string;
-  databaseTitle?: string;
+  databaseTitle: string;
+  databaseUrl: string;
 }> {
   const raw = await input({
-    message: "Paste the Skills database URL or ID:",
-    validate: (v) => parseNotionId(v) !== null || "Couldn't find a Notion ID in that input.",
+    message: "Paste the Notion database URL or ID:",
+    validate: (v) =>
+      parseNotionId(v) !== null ||
+      "Couldn't find a 32-char Notion ID in that input. Use the database's full URL.",
   });
   const databaseId = parseNotionId(raw)!;
 
-  console.log(chalk.dim(`\nLooking up database ${databaseId}...`));
+  console.log(chalk.dim(`Looking up database...`));
   let db;
   try {
     db = await client.getDatabase(databaseId);
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `Couldn't load that ID as a database. Make sure the URL points to a database (not a page or block).\n${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      [
+        `Couldn't load that database from Notion.`,
+        ``,
+        `Common causes:`,
+        `  · The URL points to a page, not a database — check it ends in /...?v=... (a database view URL)`,
+        `  · ntn is logged in to a different workspace than the one with this DB — run \`ntn doctor\``,
+        `  · The database was archived/deleted`,
+        ``,
+        `Original error: ${msg.split("\n")[0]}`,
+      ].join("\n"),
     );
   }
 
   if (db.data_sources.length === 0) {
     throw new Error(
-      `Database "${db.title}" has no data sources. This is unexpected — Notion's 2025-09-03 API should always expose at least one.`,
+      `Database "${db.title}" has no data sources, which is unexpected for the 2025-09-03 API. Try refreshing ntn (\`ntn logout && ntn login\`) and re-running.`,
     );
   }
 
@@ -269,58 +267,37 @@ async function pickExistingDatabase(client: NotionClient): Promise<{
     });
   }
 
-  console.log(chalk.green(`✓ Found "${db.title}".`));
-  return { databaseId: db.id, dataSourceId, databaseTitle: db.title };
+  console.log(chalk.green(`✓ Connected to "${db.title}"`));
+  return {
+    databaseId: db.id,
+    dataSourceId,
+    databaseTitle: db.title,
+    databaseUrl: `https://www.notion.so/${db.id.replace(/-/g, "")}`,
+  };
 }
 
 async function createNewDatabase(client: NotionClient): Promise<{
   databaseId: string;
   dataSourceId: string;
   databaseTitle: string;
+  databaseUrl: string;
 }> {
-  const parentRaw = await input({
-    message: "Paste the URL of the parent page in Notion (database will live inside it):",
-    validate: (v) => parseNotionId(v) !== null || "Couldn't find a Notion ID in that input.",
-  });
-  const parentId = parseNotionId(parentRaw)!;
-
   const title = await input({
-    message: "Database title:",
+    message: "Name for the new database:",
     default: "Skills",
   });
 
-  console.log(chalk.dim(`\nCreating database "${title}"...`));
-  const db = await client.createSkillsDatabase(parentId, title);
-  if (db.data_sources.length === 0) {
-    throw new Error("Database was created but Notion did not return a data source.");
-  }
-  console.log(
-    chalk.green(`✓ Created database. Add some pages in Notion, then run sync.`),
-  );
+  console.log(chalk.dim(`Creating database in your workspace...`));
+  const db = await client.createSkillsDatabase({ title });
+  console.log(chalk.green(`✓ Created "${db.title}"`));
+  console.log(chalk.dim(`  ${db.url}`));
 
   return {
     databaseId: db.id,
-    dataSourceId: db.data_sources[0]!.id,
+    dataSourceId: db.data_source_id,
     databaseTitle: db.title,
+    databaseUrl: db.url,
   };
-}
-
-function validateSchema(dataSource: {
-  properties: Record<string, { type: string; name: string }>;
-}): void {
-  const props = Object.values(dataSource.properties);
-  const hasDescription = props.some(
-    (p) => p.type === "rich_text" && p.name.toLowerCase() === "description",
-  );
-  if (!hasDescription) {
-    console.log(
-      chalk.yellow(
-        `\nWarning: this database has no rich_text property called "Description".\n` +
-          `Pages without a Description will be skipped during sync.\n` +
-          `Add a "Description" property in Notion to fix.`,
-      ),
-    );
-  }
 }
 
 async function pickTargets(): Promise<TargetKey[]> {
@@ -330,13 +307,43 @@ async function pickTargets(): Promise<TargetKey[]> {
     value: t.key,
     checked: t.installed,
   }));
-
   const picked = await checkbox({
-    message: "Sync targets:",
+    message: "Sync to which agent CLIs?",
     choices,
     required: true,
     validate: (vals) => (vals.length === 0 ? "Pick at least one." : true),
   });
-
   return picked.length > 0 ? picked : KNOWN_TARGETS.map((t) => t.key);
+}
+
+function printDoneBanner(args: { intent: Intent; databaseUrl: string }): void {
+  const { intent, databaseUrl } = args;
+  console.log("");
+  console.log(chalk.green("✓ Setup complete."));
+  console.log("");
+  if (intent === "fresh") {
+    console.log(`Open your new database and add a row for each skill:`);
+    console.log(`  ${chalk.cyan(databaseUrl)}`);
+    console.log("");
+    console.log(`Each row should have:`);
+    console.log(`  · A title (becomes the skill slug)`);
+    console.log(`  · A Description (the one-line "when to use" hint)`);
+    console.log(`  · The skill instructions in the page body`);
+    console.log("");
+    console.log(`When ready, run ${chalk.bold("notion-skills sync")}.`);
+  } else if (intent === "connect") {
+    console.log(`Database: ${chalk.cyan(databaseUrl)}`);
+    console.log("");
+    console.log(`Day to day:`);
+    console.log(`  · Edit skills in Notion`);
+    console.log(`  · Run ${chalk.bold("notion-skills sync")} to pull updates`);
+    console.log(`  · Use ${chalk.bold("notion-skills doctor")} if anything looks off`);
+  } else {
+    // migrate
+    console.log(`Database: ${chalk.cyan(databaseUrl)}`);
+    console.log("");
+    console.log(`Your skills are now editable in Notion.`);
+    console.log(`  · Edit a row in Notion → run ${chalk.bold("notion-skills sync")} to pull it back`);
+    console.log(`  · Originals were backed up to ~/.notion-skills/backup/migrate-<ts>/`);
+  }
 }

@@ -129,26 +129,55 @@ export class NotionClient {
   }
 
   /**
-   * Create a new database (with a default data source) for storing skills,
-   * with the full schema defined in src/schema.ts.
+   * Create a new Skills database for the user.
+   *
+   * If `parentPageId` is omitted, the database lands at the workspace root
+   * (Notion's `parent: { type: "workspace", workspace: true }` shape), which
+   * is what most users want — no need to pre-create a parent page.
+   *
+   * Notion orders database columns by property creation timestamp, so to
+   * keep a clean layout we create with just the title property, then call
+   * upgradeSchema() to add the rest one batch later.
    */
-  async createSkillsDatabase(parentPageId: string, title: string): Promise<NotionDatabaseSummary> {
+  async createSkillsDatabase(opts: {
+    title: string;
+    parentPageId?: string;
+  }): Promise<NotionDatabaseSummary & { url: string; data_source_id: string }> {
+    const parent = opts.parentPageId
+      ? { type: "page_id", page_id: opts.parentPageId }
+      : { type: "workspace", workspace: true };
+
+    const titleProp = SCHEMA.find((p) => p.kind === "title")!;
     const body = {
-      parent: { type: "page_id", page_id: parentPageId },
-      title: [{ type: "text", text: { content: title } }],
+      parent,
+      title: [{ type: "text", text: { content: opts.title } }],
       initial_data_source: {
-        properties: buildInitialDataSourceProperties(),
+        properties: {
+          [titleProp.notionName]: { title: {} },
+        },
       },
     };
     const created = await this.request<{
       id: string;
+      url?: string;
       title?: NotionRichText[];
       data_sources?: { id: string; name: string }[];
     }>("POST", "/v1/databases", body);
+
+    if (!created.data_sources?.length) {
+      throw new Error("Notion returned a database without any data sources.");
+    }
+    const dataSourceId = created.data_sources[0]!.id;
+
+    // Add the rest of the schema in one PATCH for deterministic column order.
+    await this.upgradeSchema(dataSourceId);
+
     return {
       id: created.id,
-      title: (created.title ?? []).map((t) => t.plain_text).join("") || title,
-      data_sources: created.data_sources ?? [],
+      title: (created.title ?? []).map((t) => t.plain_text).join("") || opts.title,
+      data_sources: created.data_sources,
+      data_source_id: dataSourceId,
+      url: created.url ?? `https://www.notion.so/${created.id.replace(/-/g, "")}`,
     };
   }
 

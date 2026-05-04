@@ -315,7 +315,7 @@ Errors print a one-line summary plus a suggested next command. The most common c
 
 | Error | Fix |
 |---|---|
-| "Notion auth has expired" | `ntn login` |
+| "Notion auth has expired" or "API token is invalid" | `ntn logout && ntn login` (the full reset; `ntn login` alone sometimes leaves a stuck token even when `ntn doctor` reports green) |
 | "Schema doesn't match" | `notion-skills upgrade` |
 | "isn't configured yet" | `notion-skills init` |
 | "Could not find database" | Check the URL/ID; ensure ntn is in the right workspace (`ntn doctor`). |

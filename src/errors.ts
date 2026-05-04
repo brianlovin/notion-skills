@@ -35,8 +35,11 @@ const PATTERNS: Pattern[] = [
   {
     match: (t) => /API token is invalid/i.test(t) || /NtnAuthError/.test(t),
     build: () => ({
-      summary: "Notion auth has expired or `ntn` isn't logged in.",
-      suggest: "ntn login",
+      summary: "Notion auth has expired or `ntn` is in a stuck state.",
+      detail:
+        "Sometimes `ntn doctor` reports a valid token while API calls still fail. " +
+        "The reliable fix is a full re-login.",
+      suggest: "ntn logout && ntn login",
     }),
   },
   {
