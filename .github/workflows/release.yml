@@ -64,8 +64,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.publish.outputs.version }}
         run: |
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
+          # Tag may already exist if the maintainer ran `npm version` locally
+          # and pushed with --follow-tags. Only create+push if missing.
+          if ! git rev-parse --verify --quiet "refs/tags/v$VERSION"; then
+            git tag "v$VERSION"
+            git push origin "v$VERSION"
+          fi
           gh release create "v$VERSION" \
             --title "v$VERSION" \
             --generate-notes
