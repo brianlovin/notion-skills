@@ -96,6 +96,137 @@ test("parseSkillFile: no frontmatter → invalid", async () => {
   rmSync(root, { recursive: true });
 });
 
+test("parseSkillFile: parses all spec fields into properties", async () => {
+  const root = makeFixture();
+  const dir = join(root, "fancy");
+  mkdirSync(dir);
+  writeFileSync(
+    join(dir, "SKILL.md"),
+    `---
+name: fancy
+description: Does things.
+when_to_use: When the user asks for fancy.
+argument-hint: "[issue]"
+arguments: issue branch
+allowed-tools: Read Edit Bash(git *)
+paths: src/*.ts, test/*.ts
+disable-model-invocation: true
+user-invocable: false
+model: claude-opus-4-7
+effort: high
+context: fork
+agent: Explore
+shell: bash
+---
+
+Body.`,
+  );
+  const result = await parseSkillFile(
+    join(dir, "SKILL.md"),
+    dir,
+    dir,
+    "fancy",
+  );
+  assert.ok("skill" in result);
+  const p = result.skill.properties;
+  assert.equal(p.name, "fancy");
+  assert.equal(p.description, "Does things.");
+  assert.equal(p.when_to_use, "When the user asks for fancy.");
+  assert.equal(p["argument-hint"], "[issue]");
+  assert.deepEqual(p.arguments, ["issue", "branch"]);
+  assert.deepEqual(p["allowed-tools"], ["Read", "Edit", "Bash(git *)"]); // paren-aware split
+  assert.deepEqual(p.paths, ["src/*.ts", "test/*.ts"]); // comma-split
+  assert.equal(p["disable-model-invocation"], "true");
+  assert.equal(p["user-invocable"], "false");
+  assert.equal(p.model, "claude-opus-4-7");
+  assert.equal(p.effort, "high");
+  assert.equal(p.context, "fork");
+  assert.equal(p.agent, "Explore");
+  assert.equal(p.shell, "bash");
+  rmSync(root, { recursive: true });
+});
+
+test("parseSkillFile: arguments as YAML list", async () => {
+  const root = makeFixture();
+  const dir = join(root, "yamlist");
+  mkdirSync(dir);
+  writeFileSync(
+    join(dir, "SKILL.md"),
+    `---
+name: yamlist
+description: x.
+arguments:
+  - issue
+  - branch
+allowed-tools:
+  - Read
+  - Edit
+---
+body`,
+  );
+  const result = await parseSkillFile(
+    join(dir, "SKILL.md"),
+    dir,
+    dir,
+    "yamlist",
+  );
+  assert.ok("skill" in result);
+  assert.deepEqual(result.skill.properties.arguments, ["issue", "branch"]);
+  assert.deepEqual(result.skill.properties["allowed-tools"], ["Read", "Edit"]);
+  rmSync(root, { recursive: true });
+});
+
+test("parseSkillFile: boolean-style frontmatter values for spec booleans", async () => {
+  // YAML lets users write `disable-model-invocation: true` (boolean) instead
+  // of `: "true"` (string). We should accept both and normalise to strings.
+  const root = makeFixture();
+  const dir = join(root, "bool");
+  mkdirSync(dir);
+  writeFileSync(
+    join(dir, "SKILL.md"),
+    `---
+name: bool
+description: x.
+disable-model-invocation: true
+user-invocable: false
+---
+body`,
+  );
+  const result = await parseSkillFile(
+    join(dir, "SKILL.md"),
+    dir,
+    dir,
+    "bool",
+  );
+  assert.ok("skill" in result);
+  assert.equal(result.skill.properties["disable-model-invocation"], "true");
+  assert.equal(result.skill.properties["user-invocable"], "false");
+  rmSync(root, { recursive: true });
+});
+
+test("parseSkillFile: omitted spec fields are undefined", async () => {
+  const root = makeFixture();
+  const dir = writeSkill(
+    root,
+    "minimal",
+    { name: "minimal", description: "Just the basics." },
+    "Body.",
+  );
+  const result = await parseSkillFile(
+    join(dir, "SKILL.md"),
+    dir,
+    dir,
+    "minimal",
+  );
+  assert.ok("skill" in result);
+  const p = result.skill.properties;
+  assert.equal(p.when_to_use, undefined);
+  assert.equal(p.model, undefined);
+  assert.equal(p.arguments, undefined);
+  assert.equal(p["disable-model-invocation"], undefined);
+  rmSync(root, { recursive: true });
+});
+
 test("parseSkillFile: falls back to dir name if frontmatter omits name", async () => {
   const root = makeFixture();
   const dir = writeSkill(

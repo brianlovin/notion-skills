@@ -1,6 +1,34 @@
 import { ntnApi } from "./ntn.js";
+import { SCHEMA, SELECT_DEFAULT, type PropertyDef } from "./schema.js";
 
 const NOTION_API_VERSION = "2025-09-03";
+
+/**
+ * The full set of frontmatter values for a single skill, as carried between
+ * disk and Notion. Optional values map to "unset / use spec default".
+ *
+ * The keys mirror the SKILL.md frontmatter keys exactly so callers can pass
+ * a parsed-frontmatter object straight through.
+ */
+export interface SkillProperties {
+  /** Required. Slugified page title. */
+  name: string;
+  description: string;
+  when_to_use?: string;
+  "argument-hint"?: string;
+  arguments?: string[];
+  "allowed-tools"?: string[];
+  paths?: string[];
+  "disable-model-invocation"?: string; // "true" | "false" — strings so callers can pass spec values directly
+  "user-invocable"?: string;
+  model?: string;
+  effort?: string;
+  context?: string;
+  agent?: string;
+  shell?: string;
+  /** Internal-only: filter tags. Not in the spec; not emitted to SKILL.md. */
+  tags?: string[];
+}
 
 export interface NotionPage {
   id: string;
@@ -73,66 +101,43 @@ export class NotionClient {
   }
 
   /**
-   * Create a page in the Skills data source with the standard properties.
-   * Returns the new page ID. Body is set separately via `setPageMarkdownBody`
-   * because the Notion REST API requires children-as-blocks (not markdown).
+   * Create a page in the Skills data source with the full set of spec
+   * properties. Body is set separately via `ntnSetPageMarkdown` because the
+   * Notion REST API requires children-as-blocks (not markdown).
    */
   async createSkillPage(
     dataSourceId: string,
-    title: string,
-    description: string,
-    tags: string[],
+    props: SkillProperties,
   ): Promise<string> {
     const body: Record<string, unknown> = {
       parent: { type: "data_source_id", data_source_id: dataSourceId },
-      properties: {
-        Name: { title: [{ type: "text", text: { content: title } }] },
-        Description: {
-          rich_text: [{ type: "text", text: { content: description } }],
-        },
-        Tags: { multi_select: tags.map((name) => ({ name })) },
-      },
+      properties: buildPagePropertiesPayload(props),
       children: [],
     };
     const created = await this.request<{ id: string }>("POST", "/v1/pages", body);
     return created.id;
   }
 
-  /**
-   * Patch the page's title and description without touching content.
-   * Used when --overwrite migration replaces an existing page.
-   */
+  /** Patch a page's properties without touching its content. */
   async updateSkillPageProperties(
     pageId: string,
-    title: string,
-    description: string,
-    tags: string[],
+    props: SkillProperties,
   ): Promise<void> {
     await this.request("PATCH", `/v1/pages/${pageId}`, {
-      properties: {
-        Name: { title: [{ type: "text", text: { content: title } }] },
-        Description: {
-          rich_text: [{ type: "text", text: { content: description } }],
-        },
-        Tags: { multi_select: tags.map((name) => ({ name })) },
-      },
+      properties: buildPagePropertiesPayload(props),
     });
   }
 
   /**
-   * Create a new database (with a default data source) for storing skills.
-   * Schema: Name (title), Description (rich_text), Tags (multi_select).
+   * Create a new database (with a default data source) for storing skills,
+   * with the full schema defined in src/schema.ts.
    */
   async createSkillsDatabase(parentPageId: string, title: string): Promise<NotionDatabaseSummary> {
     const body = {
       parent: { type: "page_id", page_id: parentPageId },
       title: [{ type: "text", text: { content: title } }],
       initial_data_source: {
-        properties: {
-          Name: { title: {} },
-          Description: { rich_text: {} },
-          Tags: { multi_select: { options: [] } },
-        },
+        properties: buildInitialDataSourceProperties(),
       },
     };
     const created = await this.request<{
@@ -145,6 +150,92 @@ export class NotionClient {
       title: (created.title ?? []).map((t) => t.plain_text).join("") || title,
       data_sources: created.data_sources ?? [],
     };
+  }
+
+  /**
+   * Reconcile the data source schema with src/schema.ts.
+   * Idempotent. Two flavours of change:
+   *   - Add a missing property
+   *   - Convert a property whose Notion type doesn't match the schema kind
+   *     (e.g. Agent went from rich_text to select between releases)
+   */
+  async upgradeSchema(dataSourceId: string): Promise<{
+    added: string[];
+    retyped: string[];
+  }> {
+    const current = await this.getDataSource(dataSourceId);
+    const additions: Record<string, unknown> = {};
+    const added: string[] = [];
+    const retyped: string[] = [];
+
+    for (const prop of SCHEMA) {
+      if (prop.kind === "title") continue;
+      const existing = current.properties[prop.notionName] as
+        | { type: string }
+        | undefined;
+      if (!existing) {
+        additions[prop.notionName] = propertyDefinitionPayload(prop);
+        added.push(prop.notionName);
+        continue;
+      }
+      const expectedType = expectedNotionType(prop.kind);
+      if (existing.type !== expectedType) {
+        additions[prop.notionName] = propertyDefinitionPayload(prop);
+        retyped.push(prop.notionName);
+      }
+    }
+
+    if (added.length === 0 && retyped.length === 0) {
+      return { added: [], retyped: [] };
+    }
+
+    await this.request("PATCH", `/v1/data_sources/${dataSourceId}`, {
+      properties: additions,
+    });
+    return { added, retyped };
+  }
+
+  /**
+   * For each self-healing select property, ensure that all the option names
+   * we're about to set on pages exist in the data source's option list.
+   * Adds missing ones via PATCH. Used by migrate before page creation so
+   * Notion doesn't reject values for unknown options (e.g. a new model ID).
+   *
+   * `valuesByNotionName` maps Notion column name → set of values that need
+   * to exist in that column's option list.
+   */
+  async ensureSelectOptions(
+    dataSourceId: string,
+    valuesByNotionName: Map<string, Set<string>>,
+  ): Promise<{ column: string; added: string[] }[]> {
+    if (valuesByNotionName.size === 0) return [];
+    const current = await this.getDataSource(dataSourceId);
+    const propertyPayload: Record<string, unknown> = {};
+    const report: { column: string; added: string[] }[] = [];
+
+    for (const [notionName, wantedValues] of valuesByNotionName) {
+      const def = current.properties[notionName] as
+        | { type: string; select?: { options: Array<{ id: string; name: string; color?: string }> } }
+        | undefined;
+      if (!def || def.type !== "select") continue;
+      const existing = new Set((def.select?.options ?? []).map((o) => o.name));
+      const missing = [...wantedValues].filter((v) => !existing.has(v) && v !== "");
+      if (missing.length === 0) continue;
+
+      // Preserve existing options + add the missing ones.
+      const newOptions = [
+        ...(def.select?.options ?? []).map((o) => ({ name: o.name, color: o.color })),
+        ...missing.map((name) => ({ name, color: "default" })),
+      ];
+      propertyPayload[notionName] = { select: { options: newOptions } };
+      report.push({ column: notionName, added: missing });
+    }
+
+    if (report.length === 0) return [];
+    await this.request("PATCH", `/v1/data_sources/${dataSourceId}`, {
+      properties: propertyPayload,
+    });
+    return report;
   }
 
   async queryDataSource(
@@ -233,4 +324,137 @@ export function findMultiSelectProperty(
     }
   }
   return null;
+}
+
+export function readSelect(
+  props: Record<string, NotionProperty>,
+  name: string,
+): string | null {
+  const p = props[name];
+  if (!p || p.type !== "select") return null;
+  const sel = p.select as { name?: string } | null | undefined;
+  return sel?.name ?? null;
+}
+
+// ---------- Schema payload builders ----------
+
+/**
+ * Build the `properties` block for POST /v1/pages or PATCH /v1/pages/<id>
+ * from a SkillProperties value.
+ *
+ * Only emits properties that have a value to set; absent fields are left
+ * untouched (so partial updates work).
+ */
+export function buildPagePropertiesPayload(
+  props: SkillProperties,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    Name: { title: [{ type: "text", text: { content: props.name } }] },
+    Description: {
+      rich_text: [{ type: "text", text: { content: props.description } }],
+    },
+  };
+
+  // rich_text fields
+  pushRichText(payload, "When To Use", props.when_to_use);
+  pushRichText(payload, "Argument Hint", props["argument-hint"]);
+
+  // list_text fields (joined into rich_text)
+  pushList(payload, "Arguments", props.arguments, " ");
+  pushList(payload, "Allowed Tools", props["allowed-tools"], " ");
+  pushList(payload, "Paths", props.paths, ", ");
+
+  // select fields (Agent is a self-healing select per schema)
+  pushSelect(payload, "Disable Model Invocation", props["disable-model-invocation"]);
+  pushSelect(payload, "User Invocable", props["user-invocable"]);
+  pushSelect(payload, "Model", props.model);
+  pushSelect(payload, "Effort", props.effort);
+  pushSelect(payload, "Context", props.context);
+  pushSelect(payload, "Agent", props.agent);
+  pushSelect(payload, "Shell", props.shell);
+
+  // multi_select (Tags — internal)
+  if (props.tags !== undefined) {
+    payload.Tags = { multi_select: props.tags.map((name) => ({ name })) };
+  }
+
+  return payload;
+}
+
+function pushRichText(
+  payload: Record<string, unknown>,
+  notionName: string,
+  value: string | undefined,
+): void {
+  if (value === undefined || value === "") return;
+  payload[notionName] = {
+    rich_text: [{ type: "text", text: { content: value } }],
+  };
+}
+
+function pushList(
+  payload: Record<string, unknown>,
+  notionName: string,
+  value: string[] | undefined,
+  separator: string,
+): void {
+  if (value === undefined || value.length === 0) return;
+  payload[notionName] = {
+    rich_text: [{ type: "text", text: { content: value.join(separator) } }],
+  };
+}
+
+function pushSelect(
+  payload: Record<string, unknown>,
+  notionName: string,
+  value: string | undefined,
+): void {
+  if (value === undefined || value === "") return;
+  payload[notionName] = { select: { name: value } };
+}
+
+/**
+ * Build the `initial_data_source.properties` block for creating a new
+ * database with the full schema.
+ */
+export function buildInitialDataSourceProperties(): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const prop of SCHEMA) {
+    out[prop.notionName] = propertyDefinitionPayload(prop);
+  }
+  return out;
+}
+
+/** Notion's `properties.<name>.type` string for each schema kind. */
+function expectedNotionType(kind: PropertyDef["kind"]): string {
+  switch (kind) {
+    case "title": return "title";
+    case "rich_text":
+    case "list_text": return "rich_text";
+    case "checkbox": return "checkbox";
+    case "select": return "select";
+    case "multi_select": return "multi_select";
+  }
+}
+
+/**
+ * Notion property *definition* (vs. a property *value*) for use in a
+ * create-database or PATCH /v1/data_sources call.
+ */
+export function propertyDefinitionPayload(prop: PropertyDef): unknown {
+  switch (prop.kind) {
+    case "title":
+      return { title: {} };
+    case "rich_text":
+    case "list_text":
+      return { rich_text: {} };
+    case "checkbox":
+      return { checkbox: {} };
+    case "select":
+      return {
+        select: { options: prop.options ?? [{ name: SELECT_DEFAULT }] },
+      };
+    case "multi_select":
+      return { multi_select: { options: prop.options ?? [] } };
+  }
 }

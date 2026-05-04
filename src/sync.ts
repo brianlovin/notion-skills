@@ -8,6 +8,7 @@ import {
   type NotionPage,
   readMultiSelect,
   readRichText,
+  readSelect,
   readTitle,
 } from "./notion.js";
 import { assertNtnInstalled } from "./ntn.js";
@@ -118,8 +119,7 @@ export async function runSync(
       name: k.name,
       pageId: k.id,
       lastEditedTime: k.lastEditedTime,
-      description: k.description,
-      tags: k.tags,
+      propsHash: k.propsHash,
     })),
   );
 
@@ -164,24 +164,26 @@ export async function runSync(
     }
     const skill = converted.skill;
     const md = buildSkillMarkdown({
-      name: skill.name,
-      description: skill.description,
+      properties: skill.properties,
       body: skill.body,
     });
-    const skillDir = join(dirs.contentRoot, skill.name);
+    const skillName = skill.properties.name;
+    const skillDir = join(dirs.contentRoot, skillName);
     await mkdir(skillDir, { recursive: true });
     await writeFile(join(skillDir, "SKILL.md"), md, "utf8");
 
-    const wasNew = !oldManifest.skills[skill.name];
-    if (wasNew) summary.created.push(skill.name);
-    else summary.updated.push(skill.name);
+    const wasNew = !oldManifest.skills[skillName];
+    if (wasNew) summary.created.push(skillName);
+    else summary.updated.push(skillName);
 
-    nextManifest.skills[skill.name] = {
+    const matchingSummary = kept.find((k) => k.id === skill.pageId);
+    nextManifest.skills[skillName] = {
       page_id: skill.pageId,
       last_edited_time: skill.lastEditedTime,
       hash: hashContent(md),
-      tags: skill.tags,
-      description: skill.description,
+      tags: skill.properties.tags ?? [],
+      description: skill.properties.description,
+      props_hash: matchingSummary?.propsHash,
     };
   }
 
@@ -232,19 +234,52 @@ interface PageSummary {
   tags: string[];
   description: string;
   lastEditedTime: string;
+  /** Hash over every spec-mapped property; used by manifest diff. */
+  propsHash: string;
 }
 
 function summarisePage(page: NotionPage): PageSummary | null {
   const title = readTitle(page.properties);
   if (!title) return null;
+  const tags = readMultiSelect(page.properties, TAGS_PROPERTY);
+  const description = readRichText(page.properties, "Description");
+
+  // Build a stable hash key from every spec-mapped property.
+  const propBag = readSpecPropertyBag(page);
+  const propsHash = hashContent(JSON.stringify(propBag));
+
   return {
     id: page.id,
     title,
     name: slugify(title),
-    tags: readMultiSelect(page.properties, TAGS_PROPERTY),
-    description: readRichText(page.properties, "Description"),
+    tags,
+    description,
     lastEditedTime: page.last_edited_time,
+    propsHash,
   };
+}
+
+/**
+ * Read every property the schema cares about into a deterministic, sorted
+ * record for hashing. Order-stable so the same page always hashes the same.
+ */
+function readSpecPropertyBag(page: NotionPage): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  out.description = readRichText(page.properties, "Description");
+  out.when_to_use = readRichText(page.properties, "When To Use");
+  out.argument_hint = readRichText(page.properties, "Argument Hint");
+  out.arguments = readRichText(page.properties, "Arguments");
+  out.allowed_tools = readRichText(page.properties, "Allowed Tools");
+  out.paths = readRichText(page.properties, "Paths");
+  out.disable_model_invocation = readSelect(page.properties, "Disable Model Invocation");
+  out.user_invocable = readSelect(page.properties, "User Invocable");
+  out.model = readSelect(page.properties, "Model");
+  out.effort = readSelect(page.properties, "Effort");
+  out.context = readSelect(page.properties, "Context");
+  out.agent = readSelect(page.properties, "Agent");
+  out.shell = readSelect(page.properties, "Shell");
+  out.tags = [...readMultiSelect(page.properties, TAGS_PROPERTY)].sort();
+  return out;
 }
 
 interface ScopeLayout {

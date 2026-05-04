@@ -5,9 +5,16 @@ import { createHash } from "node:crypto";
 export interface ManifestEntry {
   page_id: string;
   last_edited_time: string;
+  /** Hash of the rendered SKILL.md content. */
   hash: string;
   tags: string[];
   description: string;
+  /**
+   * Hash of all spec properties (description + tags + when_to_use + ... etc).
+   * Notion does NOT bump last_edited_time for property-only edits, so we
+   * compare this hash on every sync to detect property changes.
+   */
+  props_hash?: string;
 }
 
 export interface Manifest {
@@ -57,8 +64,12 @@ export interface CurrentPageSummary {
   name: string;
   pageId: string;
   lastEditedTime: string;
-  description: string;
-  tags: string[];
+  /**
+   * Hash over every spec property of this page (description, tags, model,
+   * effort, etc). Notion does NOT bump last_edited_time for property-only
+   * edits, so we compare this to catch them.
+   */
+  propsHash: string;
 }
 
 export function diffManifest(
@@ -75,13 +86,12 @@ export function diffManifest(
       toFetch.push(c.pageId);
       continue;
     }
-    // Notion's `last_edited_time` does NOT bump on property-only changes
-    // (e.g. tagging, description edits). So we also diff tags + description
-    // to catch property-only updates.
+    // last_edited_time covers content-block changes; props_hash covers
+    // property-only edits which Notion silently fails to surface in
+    // last_edited_time.
     if (
       old.last_edited_time !== c.lastEditedTime ||
-      old.description !== c.description ||
-      !sameStringArrays(old.tags, c.tags)
+      old.props_hash !== c.propsHash
     ) {
       toFetch.push(c.pageId);
     } else {
@@ -95,11 +105,4 @@ export function diffManifest(
   }
 
   return { toFetch, toRemove, unchanged };
-}
-
-function sameStringArrays(a: string[], b: string[]): boolean {
-  if (a.length !== b.length) return false;
-  const sortedA = [...a].sort();
-  const sortedB = [...b].sort();
-  return sortedA.every((v, i) => v === sortedB[i]);
 }

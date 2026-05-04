@@ -2,7 +2,8 @@ import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse as yamlParse } from "yaml";
-import { slugify } from "./convert.js";
+import { slugify, splitToolsRespectingParens } from "./convert.js";
+import type { SkillProperties } from "./notion.js";
 import { SKILLS_STORE } from "./paths.js";
 
 export interface ParsedSkill {
@@ -12,6 +13,8 @@ export interface ParsedSkill {
   body: string;          // markdown body, frontmatter stripped
   source: string;        // realpath to skill dir
   sourceDisplay: string; // human-friendly path (link path, not realpath)
+  /** Full spec frontmatter, ready to push to Notion. */
+  properties: SkillProperties;
 }
 
 export type Classification =
@@ -133,6 +136,23 @@ export async function parseSkillFile(
   const slug = slugify(titleRaw);
   if (!slug) return { error: "could not derive a valid slug from name" };
 
+  const properties: SkillProperties = {
+    name: slug,
+    description,
+    when_to_use: optionalString(parsedFm.when_to_use),
+    "argument-hint": optionalString(parsedFm["argument-hint"]),
+    arguments: optionalList(parsedFm.arguments, /\s+/),
+    "allowed-tools": optionalToolsList(parsedFm["allowed-tools"]),
+    paths: optionalList(parsedFm.paths, /\s*,\s*/),
+    "disable-model-invocation": optionalBoolString(parsedFm["disable-model-invocation"]),
+    "user-invocable": optionalBoolString(parsedFm["user-invocable"]),
+    model: optionalString(parsedFm.model),
+    effort: optionalString(parsedFm.effort),
+    context: optionalString(parsedFm.context),
+    agent: optionalString(parsedFm.agent),
+    shell: optionalString(parsedFm.shell),
+  };
+
   return {
     skill: {
       name: slug,
@@ -141,8 +161,51 @@ export async function parseSkillFile(
       body,
       source: sourceRealpath,
       sourceDisplay,
+      properties,
     },
   };
+}
+
+function optionalString(v: unknown): string | undefined {
+  if (v === undefined || v === null) return undefined;
+  const s = String(v).trim();
+  return s === "" ? undefined : s;
+}
+
+function optionalBoolString(v: unknown): string | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v === "boolean") return v ? "true" : "false";
+  const s = String(v).trim().toLowerCase();
+  if (s === "true" || s === "false") return s;
+  return undefined;
+}
+
+function optionalList(v: unknown, splitOn: RegExp): string[] | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (Array.isArray(v)) {
+    const items = v.map((x) => String(x).trim()).filter(Boolean);
+    return items.length === 0 ? undefined : items;
+  }
+  const s = String(v).trim();
+  if (!s) return undefined;
+  const items = s.split(splitOn).map((x) => x.trim()).filter(Boolean);
+  return items.length === 0 ? undefined : items;
+}
+
+/**
+ * Like optionalList but uses a paren-aware splitter for the
+ * `allowed-tools` field, where tools like `Bash(git *)` contain spaces.
+ */
+function optionalToolsList(v: unknown): string[] | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (Array.isArray(v)) {
+    const items = v.map((x) => String(x).trim()).filter(Boolean);
+    return items.length === 0 ? undefined : items;
+  }
+  const s = String(v).trim();
+  if (!s) return undefined;
+  const items = splitToolsRespectingParens(s);
+  return items.length === 0 ? undefined : items;
 }
 
 interface ExtractedFrontmatter {

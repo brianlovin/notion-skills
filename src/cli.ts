@@ -8,6 +8,7 @@ import { listCommand } from "./commands/list.js";
 import { statusCommand } from "./commands/status.js";
 import { tagsCommand } from "./commands/tags.js";
 import { migrateCommand } from "./commands/migrate.js";
+import { upgradeCommand } from "./commands/upgrade.js";
 
 const program = new Command();
 
@@ -56,6 +57,11 @@ program
   .command("tags")
   .description("Edit tag include/exclude filters interactively")
   .action(tagsCommand);
+
+program
+  .command("upgrade")
+  .description("Add any missing skill-spec properties to your Notion database schema")
+  .action(upgradeCommand);
 
 program
   .command("migrate")

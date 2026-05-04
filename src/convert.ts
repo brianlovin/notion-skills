@@ -4,16 +4,16 @@ import {
   NotionClient,
   readMultiSelect,
   readRichText,
+  readSelect,
   readTitle,
 } from "./notion.js";
 
 export interface SkillFile {
-  name: string;
-  description: string;
+  /** Full set of frontmatter fields from the Notion page. */
+  properties: SkillProperties;
   body: string;
   pageId: string;
   lastEditedTime: string;
-  tags: string[];
 }
 
 // ---------- slugify ----------
@@ -35,17 +35,47 @@ export function slugify(input: string): string {
 
 // ---------- frontmatter ----------
 
+import type { SkillProperties } from "./notion.js";
+import { SCHEMA, SELECT_DEFAULT, SPEC_DEFAULTS } from "./schema.js";
+
+/**
+ * Build a SKILL.md document from a SkillProperties value plus body.
+ * Emits frontmatter keys in SCHEMA order (stable for round-trips).
+ * Skips keys that are unset or match the spec default.
+ */
 export function buildSkillMarkdown(opts: {
-  name: string;
-  description: string;
+  properties: SkillProperties;
   body: string;
 }): string {
-  const fm = yamlStringify({
-    name: opts.name,
-    description: opts.description,
-  }).trimEnd();
+  const fm: Record<string, unknown> = {};
+  for (const prop of SCHEMA) {
+    if (prop.kind === "multi_select") continue; // Tags isn't in the spec; not emitted
+
+    const key = prop.frontmatterKey;
+    const value = (opts.properties as unknown as Record<string, unknown>)[key];
+
+    if (value === undefined) continue;
+
+    // Skip select values that mean "use spec default"
+    if (prop.kind === "select") {
+      if (value === "" || value === SELECT_DEFAULT) continue;
+      // For booleans (disable-model-invocation, user-invocable), also skip
+      // when the selected value matches the spec default — keeps SKILL.md
+      // tidy by only emitting non-default state.
+      const specDefault = SPEC_DEFAULTS[key];
+      if (specDefault !== undefined && value === specDefault) continue;
+    }
+
+    if (prop.kind === "rich_text" || prop.kind === "list_text") {
+      if (value === "" || (Array.isArray(value) && value.length === 0)) continue;
+    }
+
+    fm[key] = value;
+  }
+
+  const fmText = yamlStringify(fm).trimEnd();
   const body = opts.body.trim();
-  return `---\n${fm}\n---\n\n${body}\n`;
+  return `---\n${fmText}\n---\n\n${body}\n`;
 }
 
 // ---------- page → skill ----------
@@ -70,22 +100,110 @@ export async function convertPageToSkill(
   const blocks = await fetchBlockTree(client, page.id);
   const body = renderBlocks(blocks, 0);
 
-  const tags = options.tagsProperty
-    ? readMultiSelect(page.properties, options.tagsProperty)
-    : [];
-
-  const slug = slugify(title);
+  const tagsName = options.tagsProperty ?? "Tags";
+  const properties = readSkillPropertiesFromPage(page, tagsName, slugify(title), description);
   return {
     ok: true,
     skill: {
-      name: slug,
-      description,
+      properties,
       body,
       pageId: page.id,
       lastEditedTime: page.last_edited_time,
-      tags,
     },
   };
+}
+
+/**
+ * Read every spec-mapped property off a Notion page into a SkillProperties.
+ *
+ * Defaults:
+ *   - Empty rich_text / list_text → undefined
+ *   - Select == "default" or unset → undefined
+ *   - Otherwise the cell's value passes through
+ *
+ * The slug + description are passed in from the caller so we don't reread
+ * them; everything else is read fresh.
+ */
+function readSkillPropertiesFromPage(
+  page: NotionPage,
+  tagsPropertyName: string,
+  name: string,
+  description: string,
+): SkillProperties {
+  const props: SkillProperties = { name, description };
+
+  const richText = (notionName: string): string | undefined => {
+    const v = readRichText(page.properties, notionName);
+    return v ? v : undefined;
+  };
+  const listFromText = (
+    notionName: string,
+    splitOn: RegExp,
+  ): string[] | undefined => {
+    const v = readRichText(page.properties, notionName);
+    if (!v) return undefined;
+    const items = v.split(splitOn).map((s) => s.trim()).filter(Boolean);
+    return items.length ? items : undefined;
+  };
+  /**
+   * Tool patterns like `Bash(git *)` contain whitespace inside parentheses,
+   * so naive whitespace splitting wrecks them. Parse with paren-depth
+   * awareness instead — splits only on whitespace at depth 0.
+   */
+  const toolsList = (notionName: string): string[] | undefined => {
+    const v = readRichText(page.properties, notionName);
+    if (!v) return undefined;
+    return splitToolsRespectingParens(v);
+  };
+  const select = (notionName: string): string | undefined => {
+    const v = readSelect(page.properties, notionName);
+    if (!v || v === "default") return undefined;
+    return v;
+  };
+
+  props.when_to_use = richText("When To Use");
+  props["argument-hint"] = richText("Argument Hint");
+  props.arguments = listFromText("Arguments", /\s+/);
+  props["allowed-tools"] = toolsList("Allowed Tools");
+  props.paths = listFromText("Paths", /\s*,\s*/);
+  props["disable-model-invocation"] = select("Disable Model Invocation");
+  props["user-invocable"] = select("User Invocable");
+  props.model = select("Model");
+  props.effort = select("Effort");
+  props.context = select("Context");
+  props.agent = select("Agent");
+  props.shell = select("Shell");
+
+  // Tags is internal — used by filter, not emitted to SKILL.md frontmatter.
+  const tags = readMultiSelect(page.properties, tagsPropertyName);
+  if (tags.length) props.tags = tags;
+
+  return props;
+}
+
+/**
+ * Split a string on whitespace, ignoring whitespace inside parens.
+ * `Read Edit Bash(git *)` → `["Read", "Edit", "Bash(git *)"]`.
+ * Used for the `allowed-tools` frontmatter field, where tool patterns
+ * may contain spaces inside parenthesised argument matchers.
+ */
+export function splitToolsRespectingParens(s: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /\s/.test(s[i]!)) i++;
+    if (i >= s.length) break;
+    const start = i;
+    let depth = 0;
+    while (i < s.length && (depth > 0 || !/\s/.test(s[i]!))) {
+      const ch = s[i]!;
+      if (ch === "(") depth++;
+      else if (ch === ")") depth = Math.max(0, depth - 1);
+      i++;
+    }
+    out.push(s.slice(start, i));
+  }
+  return out;
 }
 
 // ---------- block tree fetch ----------

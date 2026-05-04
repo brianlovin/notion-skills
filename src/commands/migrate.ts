@@ -21,6 +21,7 @@ import {
   resolveSourceDirs,
   sourceIsInScope,
 } from "../migrate.js";
+import { SCHEMA } from "../schema.js";
 import {
   KNOWN_TARGETS,
   PROJECT_SKILLS_RELATIVE,
@@ -162,6 +163,31 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
     }
   }
 
+  // Self-heal select properties: any agent / model values referenced by
+  // the migration that aren't already options on the data source need to
+  // be added before the page-create call (Notion rejects unknown options).
+  const selfHealing = collectSelfHealingValues([...willCreate, ...willOverwrite]);
+  if (selfHealing.size > 0) {
+    const healSpinner = ora("Adding new select options...").start();
+    try {
+      const reports = await client.ensureSelectOptions(
+        scope.data_source_id,
+        selfHealing,
+      );
+      if (reports.length === 0) {
+        healSpinner.stop();
+      } else {
+        healSpinner.succeed("Added select options:");
+        for (const r of reports) {
+          console.log(`  ${chalk.green("+")} ${r.column}: ${r.added.join(", ")}`);
+        }
+      }
+    } catch (err) {
+      healSpinner.fail(`Could not extend select options: ${(err as Error).message}`);
+      throw err;
+    }
+  }
+
   // Push to Notion.
   const created: { name: string; pageId: string }[] = [];
   const updated: { name: string; pageId: string }[] = [];
@@ -172,9 +198,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
     try {
       const pageId = await client.createSkillPage(
         scope.data_source_id,
-        c.skill.title,
-        c.skill.description,
-        [],
+        c.skill.properties,
       );
       if (c.skill.body.trim()) {
         await ntnSetPageMarkdown(pageId, c.skill.body);
@@ -194,9 +218,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
     try {
       await client.updateSkillPageProperties(
         c.existingPageId,
-        c.skill.title,
-        c.skill.description,
-        [],
+        c.skill.properties,
       );
       if (c.skill.body.trim()) {
         await ntnSetPageMarkdown(c.existingPageId, c.skill.body);
@@ -321,6 +343,33 @@ async function currentScope(): Promise<Scope | null> {
   const projPath = findProjectScopePath(process.cwd());
   if (projPath) return readProjectScope(projPath);
   return readGlobalScope();
+}
+
+/**
+ * Walk every candidate's properties and collect the values it would write
+ * into a self-healing select column. Returned as a Notion-column-name →
+ * value-set map so the caller can extend the option lists in one PATCH.
+ */
+function collectSelfHealingValues(
+  classifications: Classification[],
+): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  for (const c of classifications) {
+    if (c.kind !== "new" && c.kind !== "conflict") continue;
+    const props = c.skill.properties as unknown as Record<string, unknown>;
+    for (const def of SCHEMA) {
+      if (def.kind !== "select" || !def.selfHealing) continue;
+      const value = props[def.frontmatterKey];
+      if (typeof value !== "string" || value === "" || value === "default") continue;
+      let bag = out.get(def.notionName);
+      if (!bag) {
+        bag = new Set();
+        out.set(def.notionName, bag);
+      }
+      bag.add(value);
+    }
+  }
+  return out;
 }
 
 function timestamp(): string {
