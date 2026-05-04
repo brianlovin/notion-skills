@@ -142,17 +142,16 @@ export async function runSync(
   // Write/update content for changed pages.
   const toFetch = kept.filter((k) => diff.toFetch.includes(k.id));
   const verbose = process.env.NOTION_SKILLS_DEBUG === "1";
-  const progressSpinner = toFetch.length > 0 && !verbose
-    ? ora(`Converting ${toFetch.length} pages...`).start()
-    : null;
+
+  if (toFetch.length > 0) {
+    console.log(chalk.dim(`Converting ${toFetch.length} page(s):`));
+  }
 
   for (let i = 0; i < toFetch.length; i++) {
     const summary_page = toFetch[i]!;
-    if (progressSpinner) {
-      progressSpinner.text = `Converting [${i + 1}/${toFetch.length}] ${summary_page.title}...`;
-    }
+    const counter = chalk.dim(`[${i + 1}/${toFetch.length}]`);
     if (verbose) {
-      console.error(`[${i + 1}/${toFetch.length}] Fetching "${summary_page.title}" (${summary_page.id})...`);
+      console.error(`${counter} Fetching "${summary_page.title}" (${summary_page.id})...`);
     }
     const page = pages.find((p) => p.id === summary_page.id)!;
     const converted = await convertPageToSkill(client, page, {
@@ -160,6 +159,7 @@ export async function runSync(
     });
     if (!converted.ok) {
       summary.invalid.push({ title: summary_page.title, reason: converted.reason });
+      console.log(`  ${counter} ${chalk.yellow("!")} ${summary_page.title} ${chalk.dim(`(${converted.reason})`)}`);
       continue;
     }
     const skill = converted.skill;
@@ -185,10 +185,9 @@ export async function runSync(
       description: skill.properties.description,
       props_hash: matchingSummary?.propsHash,
     };
-  }
 
-  if (progressSpinner) {
-    progressSpinner.succeed(`Converted ${toFetch.length} pages.`);
+    const mark = wasNew ? chalk.green("+") : chalk.cyan("~");
+    console.log(`  ${counter} ${mark} ${skillName}`);
   }
 
   // Remove obsolete skills from disk.

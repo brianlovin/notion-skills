@@ -3,14 +3,19 @@ import { checkbox, confirm, input, select } from "@inquirer/prompts";
 import { NotionClient, findMultiSelectProperty } from "../notion.js";
 import {
   findProjectScopePath,
+  readGlobalScope,
+  readProjectScope,
   writeGlobalScope,
   writeProjectScope,
 } from "../scope.js";
 import { detectTargets } from "../targets.js";
-import { KNOWN_TARGETS } from "../known-targets.js";
-import type { TargetKey } from "../paths.js";
+import { KNOWN_TARGETS, findTargetByKey } from "../known-targets.js";
+import { PROJECT_SCOPE_FILENAME, type TargetKey } from "../paths.js";
 import { assertNtnInstalled } from "../ntn.js";
 import { parseNotionId } from "../parse-id.js";
+import { discoverSkills } from "../migrate.js";
+import { migrateCommand } from "./migrate.js";
+import { runSync, printSummary } from "../sync.js";
 
 interface InitOptions {
   global?: boolean;
@@ -72,7 +77,6 @@ export async function initCommand(opts: InitOptions): Promise<void> {
     console.log(
       chalk.green(`\n✓ Saved global scope. Targets: ${targets.join(", ")}.`),
     );
-    console.log(`Next: ${chalk.bold("notion-skills sync")}`);
   } else {
     const cwd = process.cwd();
     if (findProjectScopePath(cwd)) {
@@ -92,9 +96,103 @@ export async function initCommand(opts: InitOptions): Promise<void> {
       filter: { include_tags: includeTags, exclude_tags: excludeTags },
     });
     console.log(chalk.green(`\n✓ Saved project scope at ${path}.`));
-    console.log(`Commit this file so collaborators get the same skills.`);
-    console.log(`Next: ${chalk.bold("notion-skills sync")}`);
+    console.log(chalk.dim(`  commit ${PROJECT_SCOPE_FILENAME} so teammates get the same skills.`));
   }
+
+  // Chain into upgrade / migrate / sync as needed. Each step is opt-in.
+  await runPostInitWizard({ source });
+}
+
+/**
+ * After a scope is saved, walk the user through the remaining setup steps
+ * conditionally:
+ *   1. Schema upgrade if Notion's columns are missing/wrong
+ *   2. Migrate local skills if they exist on disk and aren't in Notion yet
+ *   3. Sync if there's anything to pull down
+ *
+ * Each prompt defaults to Y so repeat-Enter takes the happy path.
+ */
+async function runPostInitWizard(opts: { source: "existing" | "new" }): Promise<void> {
+  // Reload the scope we just wrote.
+  const projPath = findProjectScopePath(process.cwd());
+  const scope = projPath
+    ? await readProjectScope(projPath)
+    : await readGlobalScope();
+  if (!scope) return;
+
+  const client = new NotionClient();
+
+  // --- Step 1: schema upgrade -----------------------------------------
+  console.log(chalk.dim("\nChecking Notion schema..."));
+  const { added, retyped } = await client.upgradeSchema(scope.data_source_id);
+  if (added.length === 0 && retyped.length === 0) {
+    console.log(chalk.dim("  Schema up to date."));
+  } else {
+    console.log(
+      chalk.green(
+        `  ✓ Upgraded schema: ${added.length} added, ${retyped.length} retyped`,
+      ),
+    );
+  }
+
+  // --- Step 2: discover and offer to migrate local skills -------------
+  // Skip for project scope (a fresh repo is unlikely to have local skills
+  // worth uploading). Skip when DB was just created — there's nothing to
+  // conflict with, but the discover/migrate loop reuses the migrate
+  // command anyway, so we just always run it for global.
+  if (scope.type === "global") {
+    const sourceDirs = scope.targets
+      .map((k) => findTargetByKey(k)?.dir)
+      .filter((d): d is string => !!d);
+
+    const found = await discoverSkills({ sourceDirs });
+    const newCount = found.filter((c) => c.kind === "new").length;
+
+    if (newCount > 0) {
+      console.log(
+        chalk.dim(
+          `\nFound ${newCount} local skill(s) on disk not yet in Notion.`,
+        ),
+      );
+      const doMigrate = await confirm({
+        message: `Migrate them into Notion?`,
+        default: true,
+      });
+      if (doMigrate) {
+        await migrateCommand({ yes: true });
+        // migrate runs its own sync at the end, so step 3 becomes a no-op.
+        printNextSteps();
+        return;
+      }
+    }
+  }
+
+  // --- Step 3: offer initial sync -------------------------------------
+  // For "existing" DBs we likely have content to pull down. For "new"
+  // DBs the sync is a no-op but it's still worth running so the manifest
+  // gets initialised.
+  const doSync = await confirm({
+    message: opts.source === "new" ? "Run an initial (empty) sync?" : "Pull skills from Notion now?",
+    default: true,
+  });
+  if (doSync) {
+    const reloaded = projPath
+      ? await readProjectScope(projPath)
+      : await readGlobalScope();
+    if (reloaded) {
+      const summary = await runSync(reloaded);
+      printSummary(summary);
+    }
+  }
+  printNextSteps();
+}
+
+function printNextSteps(): void {
+  console.log("");
+  console.log(chalk.green("✓ Setup complete."));
+  console.log(chalk.dim("  · `notion-skills sync` to pull updates"));
+  console.log(chalk.dim("  · `notion-skills doctor` if anything looks off"));
+  console.log(chalk.dim("  · `notion-skills tags` to refine your filter"));
 }
 
 async function chooseMode(opts: InitOptions): Promise<"global" | "project"> {

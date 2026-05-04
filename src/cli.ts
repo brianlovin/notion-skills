@@ -9,6 +9,7 @@ import { statusCommand } from "./commands/status.js";
 import { tagsCommand } from "./commands/tags.js";
 import { migrateCommand } from "./commands/migrate.js";
 import { upgradeCommand } from "./commands/upgrade.js";
+import { doctorCommand } from "./commands/doctor.js";
 
 const program = new Command();
 
@@ -59,6 +60,12 @@ program
   .action(tagsCommand);
 
 program
+  .command("doctor")
+  .description("Inspect notion-skills state and surface actionable issues")
+  .option("--fix", "auto-repair warnings where safe")
+  .action(doctorCommand);
+
+program
   .command("upgrade")
   .description("Add any missing skill-spec properties to your Notion database schema")
   .action(upgradeCommand);
@@ -72,7 +79,13 @@ program
   .option("-y, --yes", "skip the confirmation prompt")
   .action(migrateCommand);
 
-program.parseAsync(process.argv).catch((err) => {
-  console.error(err instanceof Error ? err.message : err);
-  process.exit(1);
+program.parseAsync(process.argv).catch(async (err) => {
+  // ExitPromptError is what @inquirer/prompts throws on Ctrl-C — treat as
+  // a clean abort, no error rendering.
+  if (err && typeof err === "object" && (err as { name?: string }).name === "ExitPromptError") {
+    process.exit(130);
+  }
+  const { reportError } = await import("./errors.js");
+  const code = await reportError(err);
+  process.exit(code);
 });
