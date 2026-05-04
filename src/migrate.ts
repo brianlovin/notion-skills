@@ -212,6 +212,24 @@ export function markConflicts(
   });
 }
 
+// ---------- safety check ----------
+
+/**
+ * True iff the source path lives inside one of the configured scope target
+ * dirs (e.g. ~/.claude/skills). Migration may safely move such sources to
+ * a backup because the user expects skills there to be replaced by symlinks.
+ *
+ * Sources outside the scope (--from paths, symlinks reaching into a separate
+ * repo) must never be moved — that would silently delete the user's
+ * authoritative content.
+ */
+export function sourceIsInScope(source: string, scopeTargetDirs: string[]): boolean {
+  return scopeTargetDirs.some((d) => {
+    const normalized = d.endsWith("/") ? d : d + "/";
+    return source === d || source.startsWith(normalized);
+  });
+}
+
 // ---------- source resolution ----------
 
 /**

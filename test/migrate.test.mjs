@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { discoverSkills, markConflicts, resolveSourceDirs, parseSkillFile } from "../dist/migrate.js";
+import { discoverSkills, markConflicts, resolveSourceDirs, parseSkillFile, sourceIsInScope } from "../dist/migrate.js";
 
 // ---------- helpers ----------
 
@@ -233,4 +233,51 @@ test("resolveSourceDirs: dedups duplicate paths", () => {
     extras: ["/a"],
   });
   assert.deepEqual(dirs.sort(), ["/a", "/b"]);
+});
+
+// ---------- sourceIsInScope (regression: don't delete --from sources) ----------
+
+test("sourceIsInScope: source inside a target dir is in scope", () => {
+  assert.equal(
+    sourceIsInScope("/Users/me/.claude/skills/foo", [
+      "/Users/me/.claude/skills",
+      "/Users/me/.codex/skills",
+    ]),
+    true,
+  );
+});
+
+test("sourceIsInScope: source from --from path is NOT in scope", () => {
+  // This is the regression case: an agent-config repo passed via --from
+  // resolves through a symlink so its realpath is /Users/me/Developer/agent-config/skills/foo.
+  // We must NOT consider that "in scope" — moving it would delete the user's repo.
+  assert.equal(
+    sourceIsInScope("/Users/me/Developer/agent-config/skills/foo", [
+      "/Users/me/.claude/skills",
+      "/Users/me/.codex/skills",
+    ]),
+    false,
+  );
+});
+
+test("sourceIsInScope: doesn't false-positive on prefix match", () => {
+  // /Users/me/.claude/skills-extra is NOT inside /Users/me/.claude/skills
+  assert.equal(
+    sourceIsInScope("/Users/me/.claude/skills-extra/foo", [
+      "/Users/me/.claude/skills",
+    ]),
+    false,
+  );
+});
+
+test("sourceIsInScope: trailing slash on target dir is tolerated", () => {
+  assert.equal(
+    sourceIsInScope("/a/b/skill", ["/a/b/"]),
+    true,
+  );
+});
+
+test("sourceIsInScope: source equal to target dir itself", () => {
+  // Pathological but valid: source === target dir.
+  assert.equal(sourceIsInScope("/a/b", ["/a/b"]), true);
 });

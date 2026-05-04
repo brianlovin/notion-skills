@@ -19,6 +19,7 @@ import {
   discoverSkills,
   markConflicts,
   resolveSourceDirs,
+  sourceIsInScope,
 } from "../migrate.js";
 import {
   KNOWN_TARGETS,
@@ -45,16 +46,16 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   }
 
   // Resolve sources.
+  const scopeTargetDirs =
+    scope.type === "global"
+      ? scope.targets.map((k) => KNOWN_TARGETS[k].dir)
+      : [resolve(scope.root, PROJECT_SKILLS_RELATIVE)];
+
   const sourceDirs = resolveSourceDirs(scope.type, {
     extras: opts.from ?? [],
-    targetDirs:
-      scope.type === "global"
-        ? scope.targets.map((k) => KNOWN_TARGETS[k].dir)
-        : undefined,
+    targetDirs: scope.type === "global" ? scopeTargetDirs : undefined,
     projectSkillsDir:
-      scope.type === "project"
-        ? resolve(scope.root, PROJECT_SKILLS_RELATIVE)
-        : undefined,
+      scope.type === "project" ? scopeTargetDirs[0] : undefined,
   });
 
   console.log(chalk.bold(`Sources:`));
@@ -127,26 +128,37 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   }
 
   // Move local copies to backup before any writes to Notion.
+  //
+  // Only move sources that live INSIDE a configured scope target dir
+  // (e.g. ~/.claude/skills/foo when foo is a real dir authored locally).
+  // Sources that came from --from paths, or sources reached via a symlink
+  // pointing at a different location (e.g. an agent-config repo), are
+  // left untouched — sync's symlink reconciler will repoint the symlink
+  // in the target dir without us needing to mutate the real source.
   const ts = timestamp();
   const backupRoot = join(ROOT_DIR, "backup", `migrate-${ts}`);
-  await mkdir(backupRoot, { recursive: true });
-  console.log(chalk.dim(`Backing up local copies to ${backupRoot}`));
+  let backupCreated = false;
 
   for (const c of [...willCreate, ...willOverwrite]) {
-    if (c.kind === "new" || c.kind === "conflict") {
-      const dest = join(backupRoot, c.skill.name);
-      // Move the realpath (the actual content), then any symlinks pointing
-      // at it will become broken — sync's reconciler will replace them.
-      try {
-        await mkdir(dirname(dest), { recursive: true });
-        await rename(c.skill.source, dest);
-      } catch (err) {
-        console.warn(
-          chalk.yellow(
-            `  ! could not back up ${c.skill.source}: ${(err as Error).message}`,
-          ),
-        );
-      }
+    if (c.kind !== "new" && c.kind !== "conflict") continue;
+    if (!sourceIsInScope(c.skill.source, scopeTargetDirs)) continue;
+
+    if (!backupCreated) {
+      await mkdir(backupRoot, { recursive: true });
+      console.log(chalk.dim(`Backing up local copies to ${backupRoot}`));
+      backupCreated = true;
+    }
+
+    const dest = join(backupRoot, c.skill.name);
+    try {
+      await mkdir(dirname(dest), { recursive: true });
+      await rename(c.skill.source, dest);
+    } catch (err) {
+      console.warn(
+        chalk.yellow(
+          `  ! could not back up ${c.skill.source}: ${(err as Error).message}`,
+        ),
+      );
     }
   }
 
@@ -247,7 +259,8 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
 
   console.log(
     chalk.green(
-      `✓ Migrated ${created.length + updated.length} skill(s). Backup at ${backupRoot}`,
+      `✓ Migrated ${created.length + updated.length} skill(s).` +
+        (backupCreated ? ` Backup at ${backupRoot}` : ""),
     ),
   );
 }
