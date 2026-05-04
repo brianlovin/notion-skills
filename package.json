@@ -1,7 +1,7 @@
 {
-  "name": "notion-skills",
+  "name": "@brianlovin/notion-skills",
   "version": "0.1.0",
-  "description": "Sync skills from a Notion database to your AI coding agents (Claude Code, Codex).",
+  "description": "Sync agent skills from a Notion database to Claude Code, Codex, OpenCode, Cursor, Gemini CLI.",
   "type": "module",
   "bin": {
     "notion-skills": "dist/cli.js"
@@ -22,11 +22,27 @@
   "keywords": [
     "notion",
     "claude-code",
-    "skills",
+    "claude",
     "codex",
+    "opencode",
+    "cursor",
+    "gemini",
+    "skills",
+    "agent",
     "cli"
   ],
   "license": "MIT",
+  "homepage": "https://github.com/brianlovin/notion-skills",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brianlovin/notion-skills.git"
+  },
+  "bugs": {
+    "url": "https://github.com/brianlovin/notion-skills/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@inquirer/prompts": "^7.2.1",
     "chalk": "^5.4.1",
