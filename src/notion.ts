@@ -73,6 +73,53 @@ export class NotionClient {
   }
 
   /**
+   * Create a page in the Skills data source with the standard properties.
+   * Returns the new page ID. Body is set separately via `setPageMarkdownBody`
+   * because the Notion REST API requires children-as-blocks (not markdown).
+   */
+  async createSkillPage(
+    dataSourceId: string,
+    title: string,
+    description: string,
+    tags: string[],
+  ): Promise<string> {
+    const body: Record<string, unknown> = {
+      parent: { type: "data_source_id", data_source_id: dataSourceId },
+      properties: {
+        Name: { title: [{ type: "text", text: { content: title } }] },
+        Description: {
+          rich_text: [{ type: "text", text: { content: description } }],
+        },
+        Tags: { multi_select: tags.map((name) => ({ name })) },
+      },
+      children: [],
+    };
+    const created = await this.request<{ id: string }>("POST", "/v1/pages", body);
+    return created.id;
+  }
+
+  /**
+   * Patch the page's title and description without touching content.
+   * Used when --overwrite migration replaces an existing page.
+   */
+  async updateSkillPageProperties(
+    pageId: string,
+    title: string,
+    description: string,
+    tags: string[],
+  ): Promise<void> {
+    await this.request("PATCH", `/v1/pages/${pageId}`, {
+      properties: {
+        Name: { title: [{ type: "text", text: { content: title } }] },
+        Description: {
+          rich_text: [{ type: "text", text: { content: description } }],
+        },
+        Tags: { multi_select: tags.map((name) => ({ name })) },
+      },
+    });
+  }
+
+  /**
    * Create a new database (with a default data source) for storing skills.
    * Schema: Name (title), Description (rich_text), Tags (multi_select).
    */

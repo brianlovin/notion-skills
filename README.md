@@ -101,6 +101,27 @@ notion-skills sync docker terraform   # sync only these (ignores filter)
 | `list` | Show every page in the DB and whether it's synced, filtered out, or invalid. |
 | `status` | Report ntn auth + scope + symlink health. |
 | `tags` | Interactively edit include/exclude tag filters. |
+| `migrate [--from <path>] [--overwrite] [--dry-run] [-y]` | Push existing local skills into Notion, then sync back as symlinks. Auto-extends `include_skills` so the round-trip lands on disk. Originals moved to a backup dir for reversibility. |
+
+## Migrating existing skills
+
+If you already have skills authored on disk (in `~/.claude/skills/`, `~/.codex/skills/`, an old shared repo, etc.), `notion-skills migrate` uploads them to your Skills database and replaces the local copies with symlinks to the central store.
+
+```bash
+# Preview what would happen
+notion-skills migrate --dry-run
+
+# Migrate locally-authored skills (skips ones already in Notion)
+notion-skills migrate
+
+# Pull in skills from another directory too
+notion-skills migrate --from ~/Developer/some-old-skills-repo
+
+# Force-replace Notion pages whose slug matches a local skill
+notion-skills migrate --overwrite
+```
+
+Each candidate is classified as **new** (will create), **conflict** (already in Notion — skipped unless `--overwrite`), **managed** (already a symlink into our central store, ignored), or **invalid** (no SKILL.md or no Description property). After the upload step a sync runs automatically so the new symlinks land in your target dirs. Originals move to `~/.notion-skills/backup/migrate-<timestamp>/` so you can restore if anything looks wrong.
 
 ## How it works
 

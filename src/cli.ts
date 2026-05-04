@@ -7,6 +7,7 @@ import { syncCommand } from "./commands/sync.js";
 import { listCommand } from "./commands/list.js";
 import { statusCommand } from "./commands/status.js";
 import { tagsCommand } from "./commands/tags.js";
+import { migrateCommand } from "./commands/migrate.js";
 
 const program = new Command();
 
@@ -55,6 +56,15 @@ program
   .command("tags")
   .description("Edit tag include/exclude filters interactively")
   .action(tagsCommand);
+
+program
+  .command("migrate")
+  .description("Push existing local skills into Notion, then sync back as symlinks")
+  .option("--from <path...>", "extra directories to scan, e.g. an old skills repo")
+  .option("--overwrite", "replace Notion pages whose slug matches a local skill")
+  .option("--dry-run", "show what would happen without changing anything")
+  .option("-y, --yes", "skip the confirmation prompt")
+  .action(migrateCommand);
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(err instanceof Error ? err.message : err);

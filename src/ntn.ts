@@ -155,3 +155,24 @@ export async function ntnVersion(): Promise<string | null> {
     return null;
   }
 }
+
+/**
+ * Replace a page's content with markdown. ntn does the markdown → blocks
+ * conversion server-side. Used by `migrate` to push a local SKILL.md body
+ * into a freshly-created Notion page.
+ */
+export async function ntnSetPageMarkdown(pageId: string, markdown: string): Promise<void> {
+  const result = await spawnNtn(
+    ["pages", "update", pageId, "--content", markdown, "--allow-deleting-content"],
+  );
+  if (result.code === 4 || /API token is invalid/i.test(result.stderr)) {
+    throw new NtnAuthError();
+  }
+  if (result.code !== 0) {
+    throw new NtnApiError(
+      `ntn pages update ${pageId} failed (exit ${result.code}): ${result.stderr.trim() || result.stdout.trim()}`,
+      result.code,
+      result.stderr,
+    );
+  }
+}
