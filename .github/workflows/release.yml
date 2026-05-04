@@ -1,8 +1,14 @@
 name: Release
 
 # Runs on every push to main. If the package.json version is newer than what's
-# currently published on npm, builds + tests + publishes + creates a GitHub Release.
-# To cut a release: bump `version` in package.json, commit, push.
+# currently published on npm, builds + tests + publishes + creates a GitHub
+# Release. To cut a release: bump `version` in package.json, commit, push.
+#
+# Auth: this workflow uses npm OIDC trusted publishing — npm mints a
+# short-lived token at publish time based on the repo + workflow path,
+# verified via the GitHub OIDC provider. No NPM_TOKEN secret needed.
+# Trusted publisher config lives at:
+#   https://www.npmjs.com/package/@brianlovin/notion-skills/access
 
 on:
   push:
@@ -47,7 +53,8 @@ jobs:
         id: publish
         uses: JS-DevTools/npm-publish@v3
         with:
-          token: ${{ secrets.NPM_TOKEN }}
+          # No `token:` — auth comes from npm's OIDC trusted publisher.
+          # The id-token: write permission above is what makes this work.
           access: public
           provenance: true
 
