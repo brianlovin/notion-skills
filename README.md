@@ -2,7 +2,7 @@
 
 > Sync agent skills from a Notion database to Claude Code, Codex, OpenCode, Cursor, and Gemini CLI.
 
-[![npm](https://img.shields.io/npm/v/@brianlovin/notion-skills.svg)](https://www.npmjs.com/package/@brianlovin/notion-skills)
+[![npm](https://img.shields.io/npm/v/@brianlovin/notion-skills.svg?cacheSeconds=300)](https://www.npmjs.com/package/@brianlovin/notion-skills)
 
 ## What is this?
 
@@ -28,7 +28,7 @@ You need three things before installing:
 ```bash
 # Install ntn (one of):
 brew install ntn
-# or download from https://github.com/makenotion/ntn-cli
+# or download from https://github.com/makenotion/cli
 
 # Verify version
 ntn --version

@@ -5,7 +5,7 @@ export class NtnNotInstalledError extends Error {
     super(
       "`ntn` is not installed.\n" +
         "notion-skills uses Notion's official CLI for authentication.\n\n" +
-        "Install: https://github.com/makenotion/ntn-cli\n" +
+        "Install: https://github.com/makenotion/cli\n" +
         "Then run: ntn login",
     );
     this.name = "NtnNotInstalledError";
