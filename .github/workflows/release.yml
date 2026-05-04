@@ -39,14 +39,12 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # Node 24 ships with npm 11, which is the minimum that supports
+          # OIDC trusted publishing. Earlier versions return "Tokens are
+          # required for publishing" even when an OIDC trusted publisher
+          # is configured.
+          node-version: 24
           registry-url: https://registry.npmjs.org
-
-      # OIDC trusted publishing requires a recent npm. Node 22 ships with an
-      # npm that does not yet support `--provenance --access public` over
-      # OIDC. Pin to a version known to support it.
-      - name: Upgrade npm
-        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: npm ci
