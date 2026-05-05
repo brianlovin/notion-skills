@@ -52,7 +52,13 @@ program
 
 program
   .command("list")
-  .description("List skills in the configured database with sync status")
+  .description("List skills in the store with state (installed, available, outdated, draft)")
+  .option("--installed", "only skills installed on this machine")
+  .option("--available", "only skills in the store that aren't installed")
+  .option("--outdated", "only installed skills with newer versions in the store")
+  .option("--drafts", "only local drafts (not yet published)")
+  .option("--tag <tag...>", "filter by tag (repeatable; matches all)")
+  .option("--json", "machine-readable JSON output")
   .action(listCommand);
 
 program
