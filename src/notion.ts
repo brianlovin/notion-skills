@@ -53,6 +53,7 @@ export interface NotionProperty {
   rich_text?: NotionRichText[];
   multi_select?: { id: string; name: string; color?: string }[];
   select?: { id: string; name: string; color?: string } | null;
+  number?: number | null;
   [k: string]: unknown;
 }
 
@@ -160,6 +161,7 @@ export class NotionClient {
 
     const titleProp = SCHEMA.find((p) => p.kind === "title")!;
     const descriptionProp = SCHEMA.find((p) => p.notionName === "Description")!;
+    const installsProp = SCHEMA.find((p) => p.notionName === "Installs")!;
     const body = {
       parent,
       title: [{ type: "text", text: { content: opts.title } }],
@@ -167,6 +169,7 @@ export class NotionClient {
         properties: {
           [titleProp.notionName]: { title: {} },
           [descriptionProp.notionName]: propertyDefinitionPayload(descriptionProp),
+          [installsProp.notionName]: propertyDefinitionPayload(installsProp),
         },
       },
     };
@@ -367,6 +370,39 @@ export class NotionClient {
     return this.request("GET", `/v1/pages/${pageId}`);
   }
 
+  /**
+   * Increment a number property on a page by 1. Used by `install` to
+   * bump the Installs counter. Read-then-write (Notion has no atomic
+   * increment); concurrent installs from two machines could step on
+   * each other but the data fidelity is acceptable for v1 — popular
+   * skills get more installs and that's what matters, exact counts
+   * within ±1 don't.
+   *
+   * Fail-soft: returns the new count or null if the page or property
+   * doesn't exist. Never throws — install shouldn't fail because the
+   * counter couldn't be bumped.
+   */
+  async incrementPageNumber(
+    pageId: string,
+    propertyName: string,
+  ): Promise<number | null> {
+    try {
+      const page = await this.getPage(pageId);
+      const prop = page.properties[propertyName];
+      const current =
+        prop && prop.type === "number" && typeof prop.number === "number"
+          ? prop.number
+          : 0;
+      const next = current + 1;
+      await this.request("PATCH", `/v1/pages/${pageId}`, {
+        properties: { [propertyName]: { number: next } },
+      });
+      return next;
+    } catch {
+      return null;
+    }
+  }
+
   async getBlockChildren(blockId: string): Promise<NotionBlock[]> {
     const results: NotionBlock[] = [];
     let cursor: string | undefined;
@@ -425,6 +461,16 @@ export function readMultiSelect(
   const p = props[name];
   if (!p || p.type !== "multi_select" || !Array.isArray(p.multi_select)) return [];
   return p.multi_select.map((opt) => opt.name).filter((s): s is string => !!s);
+}
+
+export function readNumber(
+  props: Record<string, NotionProperty>,
+  name: string,
+): number {
+  const p = props[name];
+  if (!p || p.type !== "number") return 0;
+  const n = p.number;
+  return typeof n === "number" ? n : 0;
 }
 
 // ---------- Schema payload builders ----------
@@ -532,6 +578,7 @@ function expectedNotionType(kind: PropertyDef["kind"]): string {
     case "rich_text":
     case "list_text": return "rich_text";
     case "checkbox": return "checkbox";
+    case "number": return "number";
     case "select": return "select";
     case "multi_select": return "multi_select";
   }
@@ -550,6 +597,8 @@ export function propertyDefinitionPayload(prop: PropertyDef): unknown {
       return { rich_text: {} };
     case "checkbox":
       return { checkbox: {} };
+    case "number":
+      return { number: { format: "number" } };
     case "select":
       return {
         select: { options: prop.options ?? [{ name: SELECT_DEFAULT }] },

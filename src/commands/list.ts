@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   NotionClient,
   readMultiSelect,
+  readNumber,
   readRichText,
   readTitle,
 } from "../notion.js";
@@ -21,6 +22,7 @@ interface ListOptions {
   outdated?: boolean;
   drafts?: boolean;
   tag?: string[];
+  sort?: "name" | "installs";
   json?: boolean;
 }
 
@@ -46,6 +48,7 @@ interface Row {
   title: string;
   description: string;
   tags: string[];
+  installs: number;
   state: SkillState;
   reason?: string;
 }
@@ -78,6 +81,7 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
         title: "(untitled)",
         description: "",
         tags: [],
+        installs: 0,
         state: "invalid",
         reason: "no title",
       });
@@ -86,15 +90,16 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
     const name = slugify(title);
     const description = readRichText(page.properties, "Description");
     const tags = readMultiSelect(page.properties, "Tags");
+    const installs = readNumber(page.properties, "Installs");
 
     if (!shouldSyncSkill(name, scope.exclude_skills)) {
-      rows.push({ name, title, description, tags, state: "excluded", reason: "exclude_skills" });
+      rows.push({ name, title, description, tags, installs, state: "excluded", reason: "exclude_skills" });
       continue;
     }
 
     const inManifest = trackedNames.has(name);
     if (!inManifest) {
-      rows.push({ name, title, description, tags, state: "available" });
+      rows.push({ name, title, description, tags, installs, state: "available" });
       continue;
     }
 
@@ -108,6 +113,7 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
       title,
       description,
       tags,
+      installs,
       state: isOutdated ? "outdated" : "installed",
     });
   }
@@ -151,6 +157,7 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
         title: entry,
         description,
         tags,
+        installs: 0,
         state: "draft",
       });
     }
@@ -172,8 +179,15 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
     return true;
   });
 
-  filtered.sort((a, b) => {
-    // Group by state for readability: installed → outdated → draft → available → excluded → invalid.
+  if (options.sort === "installs") {
+    // Sorted by install count, descending — surface popular skills first.
+    // Within the same count, alphabetical.
+    filtered.sort((a, b) => {
+      if (b.installs !== a.installs) return b.installs - a.installs;
+      return a.name.localeCompare(b.name);
+    });
+  } else {
+    // Default: group by state for readability, then alphabetical.
     const order: Record<SkillState, number> = {
       installed: 0,
       outdated: 1,
@@ -182,9 +196,11 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
       excluded: 4,
       invalid: 5,
     };
-    if (order[a.state] !== order[b.state]) return order[a.state] - order[b.state];
-    return a.name.localeCompare(b.name);
-  });
+    filtered.sort((a, b) => {
+      if (order[a.state] !== order[b.state]) return order[a.state] - order[b.state];
+      return a.name.localeCompare(b.name);
+    });
+  }
 
   if (options.json) {
     const out = filtered.map((r) => ({
@@ -192,6 +208,7 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
       title: r.title,
       description: r.description,
       tags: r.tags,
+      installs: r.installs,
       state: r.state,
       ...(r.reason ? { reason: r.reason } : {}),
     }));
@@ -238,15 +255,20 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
     const mark = stateMarker(row.state);
     const namePadded = row.name.padEnd(namePad);
     const tagPlain = row.tags.length > 0 ? ` [${row.tags.join(", ")}]` : "";
+    const installsPlain =
+      row.installs > 0 ? ` ${row.installs}↓` : "";
     const reasonPlain = row.reason ? ` (${row.reason})` : "";
     const descBudget = Math.max(
       20,
-      cols - prefixWidth - tagPlain.length - reasonPlain.length - 2,
+      cols - prefixWidth - tagPlain.length - installsPlain.length - reasonPlain.length - 2,
     );
     const desc = truncate(oneLine(row.description), descBudget);
     const tagText = tagPlain ? chalk.dim(tagPlain) : "";
+    const installsText = installsPlain ? chalk.cyan(installsPlain) : "";
     const reason = reasonPlain ? chalk.dim(reasonPlain) : "";
-    console.log(`  ${mark} ${namePadded} ${chalk.dim(desc)}${tagText}${reason}`);
+    console.log(
+      `  ${mark} ${namePadded} ${chalk.dim(desc)}${tagText}${installsText}${reason}`,
+    );
   }
 
   // Summary line.

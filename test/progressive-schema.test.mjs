@@ -175,6 +175,28 @@ test("notionPropsForSkill: empty tag array doesn't trigger Tags column", () => {
   assert.deepEqual([...result], []);
 });
 
+test("schema: Installs is a metric-only number property", () => {
+  // Installs is the per-skill install counter. It lives in Notion (so
+  // teams can spot popular skills) but never round-trips into SKILL.md
+  // frontmatter — it's store-managed metric data, not user content.
+  const def = SCHEMA.find((p) => p.notionName === "Installs");
+  assert.ok(def, "Installs must be in SCHEMA");
+  assert.equal(def.kind, "number");
+  assert.equal(def.metricOnly, true);
+});
+
+test("notionPropsForSkill: metric-only props (Installs) never trigger column creation from frontmatter", () => {
+  // Even if a user somehow puts `installs: 42` in their SKILL.md,
+  // notionPropsForSkill should not surface "Installs" — that property
+  // is managed by the install machinery, not user content.
+  const result = notionPropsForSkill({
+    name: "foo",
+    description: "ok",
+    installs: 42,
+  });
+  assert.ok(!result.has("Installs"));
+});
+
 // buildViewConfiguration shapes the Notion default-view PATCH payload.
 // Only properties that exist on the data source are emitted (skipping any
 // progressive columns we haven't added yet); all extant ones appear in

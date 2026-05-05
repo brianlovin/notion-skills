@@ -46,16 +46,22 @@ export async function initCommand(): Promise<void> {
       : { ...(await createNewDatabase(client)), isFresh: true };
 
   // ---- 2. Make sure the minimum schema exists --------------------------
-  // Fresh DBs already have Name + Description from createSkillsDatabase.
-  // For linked DBs, ensure Description exists — anything else is added
-  // progressively by migrate as skills using those properties show up.
-  // Stay silent unless we actually changed something.
+  // Fresh DBs already have Name + Description + Installs from
+  // createSkillsDatabase. For linked DBs, ensure Description AND
+  // Installs exist — anything else is added progressively by publish
+  // as skills using those properties show up. Stay silent unless we
+  // actually changed something.
   if (!isFresh) {
     const { added, retyped } = await client.upgradeSchema(dataSourceId, {
-      only: new Set(["Description"]),
+      only: new Set(["Description", "Installs"]),
     });
     if (added.length || retyped.length) {
-      console.log(chalk.dim(`Added Description column to existing database.`));
+      const total = added.length + retyped.length;
+      console.log(
+        chalk.dim(
+          `Added ${total} required ${total === 1 ? "column" : "columns"} to existing database.`,
+        ),
+      );
     }
   }
 

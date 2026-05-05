@@ -148,6 +148,13 @@ export async function installCommand(
     ),
   );
 
+  // Make sure the Installs column exists on the data source before we
+  // try to increment it. Backwards-compat for stores created before
+  // this feature landed; cheap idempotent no-op for newer stores.
+  await client.upgradeSchema(scope.data_source_id, {
+    only: new Set(["Installs"]),
+  });
+
   const nextManifest: Manifest = {
     ...manifest,
     last_synced_at: new Date().toISOString(),
@@ -191,6 +198,32 @@ export async function installCommand(
         const link = targetSkillPath(t, skill.properties.name);
         await ensureSymlink(dir, link);
       }
+
+      // Bump the Installs counter so users can spot popular skills in
+      // `list`. Fail-soft — the install succeeded; we just couldn't
+      // record the metric. Don't surface the failure to the user.
+      //
+      // The PATCH bumps the page's last_edited_time as a side effect.
+      // If we left the manifest's last_edited_time pointing at the
+      // pre-increment value, the next sync would think the page had
+      // changed and pull it again unnecessarily. Refetch so the
+      // manifest matches reality after the metadata-only edit.
+      const incremented = await client.incrementPageNumber(
+        skill.pageId,
+        "Installs",
+      );
+      if (incremented !== null) {
+        try {
+          const fresh = await client.getPage(skill.pageId);
+          nextManifest.skills[skill.properties.name] = {
+            ...nextManifest.skills[skill.properties.name]!,
+            last_edited_time: fresh.last_edited_time,
+          };
+        } catch {
+          // Refresh failure is non-fatal: the next sync reconciles.
+        }
+      }
+
       task.done();
     } catch (err) {
       task.fail((err as Error).message.split("\n")[0]);

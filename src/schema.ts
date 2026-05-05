@@ -3,12 +3,13 @@
  *
  * Each entry describes how a Notion property column corresponds to a key in
  * the Claude Code skill spec (https://code.claude.com/docs/en/skills) or the
- * notion-skills app-store discovery layer (Tags).
+ * notion-skills app-store discovery layer (Tags, Installs).
  *
  * `kind` controls the type-specific read/write logic:
  *   - "title"        → page title; the only required, name-bearing property
  *   - "rich_text"    → plain string; empty cell omits the frontmatter key
  *   - "checkbox"     → boolean
+ *   - "number"       → integer; used for metric-only props like Installs
  *   - "select"       → string from a fixed option set; "default" / empty omit
  *   - "multi_select" → list of strings from an open option set; new options
  *                      auto-added on publish
@@ -24,6 +25,7 @@ export type PropertyKind =
   | "title"
   | "rich_text"
   | "checkbox"
+  | "number"
   | "select"
   | "multi_select"
   | "list_text";
@@ -53,6 +55,14 @@ export interface PropertyDef {
    * value.
    */
   selfHealing?: boolean;
+  /**
+   * When true the property exists in Notion but is NOT round-tripped to
+   * SKILL.md frontmatter — it's metric/store-managed data, not user
+   * content. Examples: Installs (number incremented per install).
+   * Frontmatter parsers, payload builders, and progressive-schema
+   * derivation all skip these.
+   */
+  metricOnly?: boolean;
 }
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -197,6 +207,17 @@ export const SCHEMA: PropertyDef[] = [
     selfHealing: true,
     description: "Discovery tags. Self-healing — new tags auto-added on publish.",
   },
+  {
+    // Per-skill install counter. Incremented +1 by `notion-skills install`
+    // on each successful install. Surfaced in `list` so users can spot
+    // popular skills. Metric-only — never round-trips into SKILL.md
+    // frontmatter (it's store-managed data, not user content).
+    notionName: "Installs",
+    frontmatterKey: "installs",
+    kind: "number",
+    metricOnly: true,
+    description: "Install count. Auto-incremented by `notion-skills install`.",
+  },
 ];
 
 /**
@@ -281,6 +302,7 @@ export function notionPropsForSkill(
     if (specDefault !== undefined && value === specDefault) continue;
     const def = SCHEMA.find((p) => p.frontmatterKey === key);
     if (!def) continue;
+    if (def.metricOnly) continue;
     out.add(def.notionName);
   }
   return out;
