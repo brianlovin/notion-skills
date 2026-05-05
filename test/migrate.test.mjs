@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { discoverSkills, markConflicts, resolveSourceDirs, parseSkillFile, sourceIsInScope } from "../dist/migrate.js";
@@ -344,6 +344,101 @@ test("discoverSkills: missing source dir is silently skipped", async () => {
   assert.deepEqual(results, []);
 });
 
+test("discoverSkills: central-store entry not in trackedNames classifies as new", async () => {
+  // Regression: this is the path `gen` relies on. The agent writes to
+  // <central_store>/<slug>/SKILL.md and migrate must classify it as a
+  // candidate for upload, not as already-synced.
+  const root = makeFixture();
+  const centralStore = join(root, "skills");
+  mkdirSync(centralStore);
+  writeSkill(centralStore, "fresh-local", { name: "fresh-local", description: "ok" }, "body");
+
+  const results = await discoverSkills({
+    sourceDirs: [centralStore],
+    centralStore,
+    trackedNames: new Set(),
+  });
+  const news = results.filter((r) => r.kind === "new");
+  assert.equal(news.length, 1);
+  assert.equal(news[0].skill.name, "fresh-local");
+  rmSync(root, { recursive: true });
+});
+
+test("discoverSkills: central-store entry in trackedNames classifies as managed", async () => {
+  // Regression: skills synced from Notion shouldn't look like upload
+  // candidates. Once a skill is in the manifest it's considered tracked,
+  // so re-running migrate over the central store is a no-op for it.
+  const root = makeFixture();
+  const centralStore = join(root, "skills");
+  mkdirSync(centralStore);
+  writeSkill(centralStore, "synced-already", { name: "synced-already", description: "ok" }, "body");
+
+  const results = await discoverSkills({
+    sourceDirs: [centralStore],
+    centralStore,
+    trackedNames: new Set(["synced-already"]),
+  });
+  const news = results.filter((r) => r.kind === "new");
+  const managed = results.filter((r) => r.kind === "managed");
+  assert.equal(news.length, 0);
+  assert.equal(managed.length, 1);
+  rmSync(root, { recursive: true });
+});
+
+test("discoverSkills: managed entries dedupe by name across multiple target dirs", async () => {
+  // Regression: previously a skill present in N target dirs (as
+  // symlinks into the central store) plus the real entry in the
+  // central store produced N+1 "managed" classifications, which
+  // surfaced as confusing counts like "76 managed" for 19 skills.
+  // The dedup keys on slug, so each skill shows up at most once.
+  const root = realpathSync(makeFixture());
+  const centralStore = join(root, "skills");
+  const claudeDir = join(root, "claude-skills");
+  const codexDir = join(root, "codex-skills");
+  mkdirSync(centralStore);
+  mkdirSync(claudeDir);
+  mkdirSync(codexDir);
+  writeSkill(centralStore, "shared", { name: "shared", description: "ok" }, "body");
+  symlinkSync(join(centralStore, "shared"), join(claudeDir, "shared"));
+  symlinkSync(join(centralStore, "shared"), join(codexDir, "shared"));
+
+  const results = await discoverSkills({
+    sourceDirs: [centralStore, claudeDir, codexDir],
+    centralStore,
+    trackedNames: new Set(["shared"]),
+  });
+  const managed = results.filter((r) => r.kind === "managed");
+  assert.equal(managed.length, 1, "managed entries should dedupe by name");
+  assert.equal(managed[0].name, "shared");
+  rmSync(root, { recursive: true });
+});
+
+test("discoverSkills: symlink in target dir pointing into central store stays managed", async () => {
+  // The classic post-migrate state: ~/.claude/skills/foo is a symlink
+  // into ~/.notion-skills/skills/foo. The symlink scan should classify
+  // it as managed regardless of whether `foo` is in trackedNames at
+  // discovery time, because the symlink itself isn't a candidate for
+  // upload — its target is.
+  const root = realpathSync(makeFixture());
+  const centralStore = join(root, "skills");
+  const targetDir = join(root, "claude-skills");
+  mkdirSync(centralStore);
+  mkdirSync(targetDir);
+  writeSkill(centralStore, "real-foo", { name: "real-foo", description: "ok" }, "body");
+  symlinkSync(join(centralStore, "real-foo"), join(targetDir, "real-foo"));
+
+  const results = await discoverSkills({
+    sourceDirs: [targetDir],
+    centralStore,
+    trackedNames: new Set(),
+  });
+  // The symlink should be classified as managed (not as a "new" upload
+  // candidate) — its realpath is in the central store.
+  assert.ok(results.some((r) => r.kind === "managed" && r.name === "real-foo"));
+  assert.ok(!results.some((r) => r.kind === "new"));
+  rmSync(root, { recursive: true });
+});
+
 // ---------- markConflicts ----------
 
 test("markConflicts: turns 'new' into 'conflict' when slug matches", () => {
@@ -443,3 +538,4 @@ test("sourceIsInScope: source equal to target dir itself", () => {
   // Pathological but valid: source === target dir.
   assert.equal(sourceIsInScope("/a/b", ["/a/b"]), true);
 });
+

@@ -45,14 +45,31 @@ export type Classification =
 export interface DiscoverOptions {
   /** Directories that contain `<skill-name>/SKILL.md` children. */
   sourceDirs: string[];
+  /**
+   * Names of skills currently tracked by the manifest. Used to tell
+   * "central-store entry that's already synced" from "central-store
+   * entry the user/gen authored locally and hasn't pushed yet."
+   * Without this, every central-store entry would look like a candidate
+   * for re-upload, which is wrong for skills that came down from Notion.
+   */
+  trackedNames?: Set<string>;
+  /**
+   * Override the central-store path. Defaults to the SKILLS_STORE
+   * constant. Tests pass a temp dir; production uses the default.
+   */
+  centralStore?: string;
 }
 
 export async function discoverSkills(opts: DiscoverOptions): Promise<Classification[]> {
+  const centralStore = opts.centralStore ?? SKILLS_STORE;
   // Pass 1: walk every source dir and produce one classification per
   // realpath we haven't already seen. Same-realpath dedup handles symlinks
-  // pointing at the same target.
+  // pointing at the same target. We also dedup managed entries by name —
+  // a single skill symlinked from N target dirs + the real entry in the
+  // central store is N+1 hits, but only one entry's worth of meaning.
   const out: Classification[] = [];
   const seenRealpaths = new Set<string>();
+  const seenManagedNames = new Set<string>();
 
   for (const dir of opts.sourceDirs) {
     if (!existsSync(dir)) continue;
@@ -75,9 +92,31 @@ export async function discoverSkills(opts: DiscoverOptions): Promise<Classificat
         continue;
       }
 
-      // Skip already-managed skills (point into our central store).
-      if (realpath.startsWith(SKILLS_STORE + "/") || realpath === SKILLS_STORE) {
-        out.push({ kind: "managed", sourceDisplay, name: entry });
+      const inCentralStore =
+        realpath.startsWith(centralStore + "/") || realpath === centralStore;
+      const sourceInCentralStore =
+        sourceDisplay.startsWith(centralStore + "/") ||
+        sourceDisplay === centralStore;
+
+      // Symlink from a target dir into central store → already synced
+      // (managed). The actual entry sitting in the central store is
+      // handled by the central-store branch below.
+      if (inCentralStore && !sourceInCentralStore) {
+        if (!seenManagedNames.has(entry)) {
+          seenManagedNames.add(entry);
+          out.push({ kind: "managed", sourceDisplay, name: entry });
+        }
+        continue;
+      }
+
+      // Real entry inside the central store. If it's tracked by the
+      // manifest, it was synced from Notion — managed. Otherwise treat
+      // as a local-only skill that's a candidate for upload.
+      if (sourceInCentralStore && opts.trackedNames?.has(entry)) {
+        if (!seenManagedNames.has(entry)) {
+          seenManagedNames.add(entry);
+          out.push({ kind: "managed", sourceDisplay, name: entry });
+        }
         continue;
       }
 

@@ -31,6 +31,8 @@ After making changes:
 - `runSync(scope, { quiet: true })` is the silent path used by migrate after upload. New output should respect the flag.
 - Notion's `last_edited_time` rounds to the minute. Conflict-resolution tests need a ≥ 1-minute gap between local and remote edits.
 - Sync's push reuses `parseSkillFile` from `src/migrate.ts` and the progressive `upgradeSchema(only)` + `ensureSelectOptions` flow. Don't duplicate that pipeline.
+- `gen` hands its wrapped prompt to a coding-agent CLI (claude, codex, opencode, gemini) defined in `src/gen-agents.ts`. The agent's only job is to write a SKILL.md to `~/.notion-skills/skills/<slug>/`; on exit, `gen` calls `migrateCommand` directly. The agent never runs shell commands. The contract lives in `src/gen-prompt.ts`. Adding a new agent = one entry in the registry.
+- The central store (`~/.notion-skills/skills/`) is the only place skills live on disk. The manifest tells `migrate` which entries are already in Notion (managed) vs new local skills awaiting upload. There's no "drafts" or staging concept.
 - The published npm artifact is the contents of `dist/`. Don't import from `dist/` in `src/`.
 
 ## Workflow

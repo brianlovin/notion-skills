@@ -12,6 +12,7 @@ import { statusCommand } from "./commands/status.js";
 import { migrateCommand } from "./commands/migrate.js";
 import { upgradeCommand } from "./commands/upgrade.js";
 import { doctorCommand } from "./commands/doctor.js";
+import { genCommand } from "./commands/gen.js";
 
 // Read version from package.json so `--version` stays in sync with bumps
 // without us remembering to edit two places.
@@ -69,6 +70,13 @@ program
   .command("upgrade")
   .description("Add any missing skill-spec properties to your Notion database schema")
   .action(upgradeCommand);
+
+program
+  .command("gen")
+  .description("Generate a new skill from a URL, file path, or natural-language prompt via your coding agent")
+  .argument("<input>", "URL, file path, or natural-language description")
+  .option("--agent <key>", "override the configured coding agent (claude, codex, opencode, gemini)")
+  .action(genCommand);
 
 program
   .command("migrate")

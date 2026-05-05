@@ -13,6 +13,12 @@ export interface Scope {
    * no UI for it (rare enough to not warrant a command).
    */
   exclude_skills?: string[];
+  /**
+   * The coding-agent CLI key (claude, codex, opencode, gemini) used by
+   * `notion-skills gen`. Set on first gen invocation; can be overridden
+   * per-run with `--agent`.
+   */
+  gen_agent?: string;
   /** Path to the scope file on disk. */
   path: string;
 }
@@ -28,6 +34,7 @@ interface RawScope {
   database_title?: string;
   targets?: string[];
   exclude_skills?: string[];
+  gen_agent?: string;
   filter?: { exclude_skills?: string[] };
 }
 
@@ -45,6 +52,7 @@ export async function getScope(): Promise<Scope | null> {
     database_title: raw.database_title,
     targets: raw.targets ?? [],
     exclude_skills: raw.exclude_skills ?? raw.filter?.exclude_skills,
+    gen_agent: raw.gen_agent,
     path: SCOPE_FILE,
   };
 }
@@ -56,6 +64,7 @@ export async function writeScope(scope: Omit<Scope, "path">): Promise<void> {
     database_title: scope.database_title,
     targets: scope.targets,
     exclude_skills: scope.exclude_skills,
+    gen_agent: scope.gen_agent,
   };
   await writeJson(SCOPE_FILE, payload);
 }

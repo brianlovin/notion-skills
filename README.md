@@ -74,6 +74,7 @@ In Notion that's a row with the title `deslop`, a `Description` property, and th
 |---|---|
 | `init` | Guided first-time setup. |
 | `sync` | Pull from Notion AND push local edits to skills already in Notion. New local skills (not yet tracked) need `init` or `migrate`. Conflicts resolved last-edit-wins; Notion's page history is the safety net. |
+| `gen <input>` | Generate a new skill from a URL, file path, or prompt — hands off to your coding agent (Claude, Codex, OpenCode, or Gemini) which writes the SKILL.md and pushes it to Notion. Flag: `--agent <key>` to override the configured agent. |
 | `migrate` | Push existing local skills to Notion in bulk. Flags: `--from <path>` (extra source), `--overwrite`, `--dry-run`, `-y` (skip confirm). |
 | `list` | Print every page with sync status. |
 | `status` | Show auth, scope, and per-target symlink health. |
@@ -94,6 +95,22 @@ Add `--help` to any command for full options.
 | Gemini | `~/.gemini/skills/` |
 
 Adding another is one entry in [`src/known-targets.ts`](src/known-targets.ts) — PRs welcome.
+
+## Generating skills (`gen`)
+
+`notion-skills gen <input>` turns a URL, file path, or natural-language prompt into a new skill via the coding-agent CLI you already use:
+
+```bash
+notion-skills gen https://www.aihero.dev/grill-with-docs
+notion-skills gen ~/notes/playwright-tips.md
+notion-skills gen "skill to help me check the weather"
+```
+
+The first run prompts you to pick a coding agent (Claude, Codex, OpenCode, or Gemini, biased toward your sync targets) and saves the choice to `~/.notion-skills/scope.json`. Subsequent runs hand off automatically. Override per-run with `--agent <key>`.
+
+The agent receives a wrapped prompt that explains the SKILL.md format and asks it to write the file to `~/.notion-skills/skills/<slug>/SKILL.md` — the same dir every other skill lives in. When the agent exits, `notion-skills` notices the new entry isn't in the manifest and pushes it to Notion. The agent never runs shell commands; that means no permission gates, no path confusion.
+
+Authoring by hand works the same way: `mkdir ~/.notion-skills/skills/<slug>`, write `SKILL.md`, run `notion-skills migrate`.
 
 ## Excluding skills
 

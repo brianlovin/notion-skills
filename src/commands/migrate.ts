@@ -15,7 +15,8 @@ import {
 } from "../migrate.js";
 import { SCHEMA, notionPropsForSkill } from "../schema.js";
 import { findTargetByKey } from "../known-targets.js";
-import { ROOT_DIR } from "../paths.js";
+import { MANIFEST_FILE, ROOT_DIR, SKILLS_STORE } from "../paths.js";
+import { readManifest } from "../manifest.js";
 import { runSync, printSummary } from "../sync.js";
 import { startTask } from "./_progress.js";
 
@@ -43,15 +44,24 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
     );
   }
 
-  // Resolve sources.
+  // Resolve sources. The central store is always scanned: a SKILL.md
+  // sitting there with no manifest entry is a local-only skill that
+  // needs uploading (AI-authored via `gen`, or written by hand).
   const scopeTargetDirs = scope.targets
     .map((k) => findTargetByKey(k)?.dir)
     .filter((d): d is string => !!d);
 
   const sourceDirs = resolveSourceDirs({
-    extras: opts.from ?? [],
+    extras: [SKILLS_STORE, ...(opts.from ?? [])],
     targetDirs: scopeTargetDirs,
   });
+
+  // Manifest tells us which central-store entries are already synced
+  // from Notion (so they aren't candidates for re-upload).
+  const manifest = await readManifest(MANIFEST_FILE);
+  const trackedNames = new Set(
+    manifest ? Object.keys(manifest.skills) : [],
+  );
 
   // Caller-curated runs (init/sync) suppress the source/probe prelude —
   // they already showed the user the picker, so an extra "Sources:" +
@@ -67,7 +77,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   }
 
   // Discovery + initial classification.
-  let classifications = await discoverSkills({ sourceDirs });
+  let classifications = await discoverSkills({ sourceDirs, trackedNames });
 
   // Conflict detection: query Notion for existing slugs.
   const client = new NotionClient();
@@ -244,10 +254,11 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   // ---------- Phase 2: back up local copies whose Notion write succeeded ----------
   //
   // Only move sources that live INSIDE a configured scope target dir
-  // (e.g. ~/.claude/skills/foo when foo is a real dir authored locally).
-  // Sources from --from paths or symlinks pointing elsewhere are left
-  // untouched — sync's reconciler handles those without us mutating the
-  // real source.
+  // (e.g. ~/.claude/skills/foo). Those need to be replaced by symlinks
+  // to the central store. Central-store sources (~/.notion-skills/skills/)
+  // are already in their permanent home — moving them would erase the
+  // skill we just uploaded. Sources from --from paths are also left
+  // untouched since they may be a user's authoritative authoring repo.
   const ts = timestamp();
   const backupRoot = join(ROOT_DIR, "backup", `migrate-${ts}`);
   let backupCreated = false;
