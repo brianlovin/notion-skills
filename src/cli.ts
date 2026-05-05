@@ -32,7 +32,7 @@ const program = new Command();
 
 program
   .name("notion-skills")
-  .description("Sync skills from a Notion database to your AI coding agents.")
+  .description("A skill store for your AI coding agents. Author once in Notion, install only what you need, share with your team.")
   .version(pkg.version);
 
 program

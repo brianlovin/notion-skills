@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import { checkbox, input, select } from "@inquirer/prompts";
+import { checkbox, confirm, input, select } from "@inquirer/prompts";
 import { NotionClient } from "../notion.js";
 import { writeScope } from "../scope.js";
 import { detectTargets } from "../targets.js";
@@ -12,16 +12,19 @@ import { migrateCommand } from "./migrate.js";
 import { pickLocalSkillsToUpload } from "./_pick-locals.js";
 
 /**
- * Wizard flow:
+ * Wizard flow (app-store framing):
  *
  *   1. "Create a new database, or link an existing one?" (default = create)
  *   2. Reconcile minimum schema (Name + Description); rest is added by
- *      migrate as skills with those properties show up
- *   3. Pick sync targets (parent dir of each known target gates default-on)
- *   4. Save scope
- *   5. Scan local skills NOT yet in the DB; if any exist, show a
- *      multiselect picker and offer to upload them via migrate
- *   6. Print summary with the DB URL
+ *      `publish` as skills with those properties show up.
+ *   3. Pick sync targets (parent dir of each known target gates default-on).
+ *   4. Save scope.
+ *   5. Detect local skills outside the central store. If any exist, ask
+ *      whether to import them — explicit confirmation, then multiselect.
+ *      Imports nothing by default; the store starts empty for new users
+ *      so they pick what to install rather than getting everything.
+ *   6. Print a done banner that points at next steps (`list`, `gen`,
+ *      `install --all`, etc.) so the empty default never feels lost.
  */
 export async function initCommand(): Promise<void> {
   await assertNtnInstalled();
@@ -68,11 +71,13 @@ export async function initCommand(): Promise<void> {
   });
   console.log(chalk.green(`✓ Saved scope (targets: ${targets.join(", ")})`));
 
-  // ---- 5. Detect local skills not yet in Notion ------------------------
-  // Only scan dirs the user opted into as sync targets — surfacing a skill
-  // from an unselected agent (e.g. ~/.cursor/skills when Cursor isn't a
-  // target) would falsely suggest it'd get migrated, and migrate would
-  // skip it because that dir isn't in scope.
+  // ---- 5. Offer to import any local skills found on this machine -------
+  //
+  // App-store rule: init does NOT auto-import or auto-install anything.
+  // The store starts empty for the user — they pick what to install.
+  // We do, however, look for skills already on disk and offer to bring
+  // them in, since that's the realistic on-ramp for users who have
+  // existing scattered skill files.
   const targetDirs = targets
     .map((k) => KNOWN_TARGETS.find((t) => t.key === k)?.dir)
     .filter((d): d is string => !!d);
@@ -82,15 +87,27 @@ export async function initCommand(): Promise<void> {
   );
 
   if (newCandidates.length > 0) {
-    const picked = await pickLocalSkillsToUpload(
-      newCandidates.map((c) => c.skill),
+    console.log("");
+    console.log(
+      chalk.dim(
+        `Found ${newCandidates.length} ${newCandidates.length === 1 ? "skill" : "skills"} on this machine that ${newCandidates.length === 1 ? "isn't" : "aren't"} in your store yet.`,
+      ),
     );
-    if (picked.length > 0) {
-      await migrateCommand({ yes: true, only: picked });
+    const wantsImport = await confirm({
+      message: `Import ${newCandidates.length === 1 ? "it" : "them"} into the store now?`,
+      default: true,
+    });
+    if (wantsImport) {
+      const picked = await pickLocalSkillsToUpload(
+        newCandidates.map((c) => c.skill),
+      );
+      if (picked.length > 0) {
+        await migrateCommand({ yes: true, only: picked });
+      }
     }
   }
 
-  // ---- 7. Done banner --------------------------------------------------
+  // ---- 6. Done banner --------------------------------------------------
   printDoneBanner({ isFresh, databaseUrl });
 }
 
@@ -200,16 +217,17 @@ function printDoneBanner(args: { isFresh: boolean; databaseUrl: string }): void 
   console.log("");
   console.log(chalk.green("✓ Setup complete."));
   console.log("");
-  console.log(`Database: ${chalk.cyan(databaseUrl)}`);
+  console.log(`Store: ${chalk.cyan(databaseUrl)}`);
   console.log("");
   if (isFresh) {
-    console.log(`Add a row in Notion for each skill you want to share.`);
-    console.log(`Each row needs a title, a Description, and instructions in the page body.`);
-    console.log(`When ready, run ${chalk.bold("notion-skills sync")}.`);
+    console.log(`Your skill store is empty. To add skills:`);
+    console.log(`  · ${chalk.bold("notion-skills gen <input>")}     — author a new skill via your coding agent`);
+    console.log(`  · Edit pages in Notion directly, then ${chalk.bold("notion-skills install <slug>")}`);
   } else {
-    console.log(`Day to day:`);
-    console.log(`  · Edit skills in Notion`);
-    console.log(`  · ${chalk.bold("notion-skills sync")} pulls updates`);
-    console.log(`  · ${chalk.bold("notion-skills doctor")} if anything looks off`);
+    console.log(`Browse and install:`);
+    console.log(`  · ${chalk.bold("notion-skills list")}                  — see what's in the store`);
+    console.log(`  · ${chalk.bold("notion-skills install <slug>")}        — install a single skill`);
+    console.log(`  · ${chalk.bold("notion-skills install --tag <name>")}  — install all skills with a tag`);
+    console.log(`  · ${chalk.bold("notion-skills install --all")}         — install everything (power-user)`);
   }
 }
