@@ -103,7 +103,7 @@ export async function runSync(
   if (colliding.size > 0) {
     warn(
       chalk.yellow(
-        `Skipping ${colliding.size} duplicate slug(s): ${[...colliding].join(", ")}. Rename one of the colliding pages in Notion.`,
+        `Skipping ${colliding.size} duplicate ${colliding.size === 1 ? "slug" : "slugs"}: ${[...colliding].join(", ")}. Rename one of the colliding pages in Notion.`,
       ),
     );
   }
@@ -187,7 +187,7 @@ export async function runSync(
   const verbose = process.env.NOTION_SKILLS_DEBUG === "1";
 
   if (toFetch.length > 0) {
-    log(chalk.dim(`Converting ${toFetch.length} page(s):`));
+    log(chalk.dim(`Converting ${toFetch.length} ${toFetch.length === 1 ? "page" : "pages"}:`));
   }
 
   for (let i = 0; i < toFetch.length; i++) {

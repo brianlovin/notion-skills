@@ -73,7 +73,7 @@ In Notion that's a row with the title `deslop`, a `Description` property, and th
 | Command | What it does |
 |---|---|
 | `init` | Guided first-time setup. |
-| `sync` | Pull from Notion. Skips unchanged pages. Offers to upload local skills not in Notion. |
+| `sync` | Pull from Notion. Skips unchanged pages. Pull-only — to push local skills, use `init` (first time) or `migrate`. |
 | `migrate` | Push existing local skills to Notion in bulk. Flags: `--from <path>` (extra source), `--overwrite`, `--dry-run`, `-y` (skip confirm). |
 | `list` | Print every page with sync status. |
 | `status` | Show auth, scope, and per-target symlink health. |

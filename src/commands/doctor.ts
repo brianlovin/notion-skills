@@ -129,7 +129,7 @@ async function checkSchema(scope: Scope): Promise<CheckResult[]> {
     return [
       {
         status: "warn",
-        label: `Schema missing ${missing.length} property(ies): ${missing.map((m) => m.notionName).join(", ")}`,
+        label: `Schema missing ${missing.length} ${missing.length === 1 ? "property" : "properties"}: ${missing.map((m) => m.notionName).join(", ")}`,
         detail: "Run `notion-skills upgrade` to add them.",
       },
     ];
@@ -174,19 +174,20 @@ async function checkManifestVsDisk(_scope: Scope): Promise<CheckResult[]> {
   const out: CheckResult[] = [];
   out.push({
     status: "ok",
-    label: `Manifest tracks ${inManifest.size} skill(s); central store has ${onDisk.size}`,
+    label: `Manifest tracks ${inManifest.size} ${inManifest.size === 1 ? "skill" : "skills"}; central store has ${onDisk.size}`,
   });
 
   if (orphans.length > 0) {
+    const word = orphans.length === 1 ? "dir" : "dirs";
     out.push({
       status: "warn",
-      label: `${orphans.length} central-store dir(s) not in manifest: ${orphans.slice(0, 5).join(", ")}${orphans.length > 5 ? "…" : ""}`,
+      label: `${orphans.length} central-store ${word} not in manifest: ${orphans.slice(0, 5).join(", ")}${orphans.length > 5 ? "…" : ""}`,
       detail: "Probably stale from a previous DB. Safe to remove.",
       fix: async () => {
         for (const name of orphans) {
           await rm(join(contentRoot, name), { recursive: true, force: true });
         }
-        return `Removed ${orphans.length} orphaned central-store dir(s)`;
+        return `Removed ${orphans.length} orphaned central-store ${word}`;
       },
     });
   }
@@ -194,7 +195,7 @@ async function checkManifestVsDisk(_scope: Scope): Promise<CheckResult[]> {
   if (phantoms.length > 0) {
     out.push({
       status: "warn",
-      label: `${phantoms.length} manifest entry(ies) point to missing files: ${phantoms.slice(0, 5).join(", ")}${phantoms.length > 5 ? "…" : ""}`,
+      label: `${phantoms.length} manifest ${phantoms.length === 1 ? "entry points" : "entries point"} to missing files: ${phantoms.slice(0, 5).join(", ")}${phantoms.length > 5 ? "…" : ""}`,
       detail: "Re-run sync to repopulate.",
     });
   }
@@ -306,13 +307,15 @@ function printAndExit(checks: CheckResult[]): void {
     console.log(chalk.green(`✓ All ${counts.ok} checks passed.`));
   } else {
     const fixable = checks.filter((c) => c.fix && c.status !== "ok").length;
+    const warnWord = counts.warn === 1 ? "warning" : "warnings";
+    const failWord = counts.fail === 1 ? "failure" : "failures";
     console.log(
-      `${counts.ok} ok, ${counts.warn} warning(s), ${counts.fail} failure(s).`,
+      `${counts.ok} ok, ${counts.warn} ${warnWord}, ${counts.fail} ${failWord}.`,
     );
     if (fixable > 0) {
       console.log(
         chalk.dim(
-          `${fixable} issue(s) can be auto-fixed: run \`notion-skills doctor --fix\``,
+          `${fixable} ${fixable === 1 ? "issue" : "issues"} can be auto-fixed: run \`notion-skills doctor --fix\``,
         ),
       );
     }

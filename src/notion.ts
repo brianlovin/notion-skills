@@ -1,5 +1,5 @@
 import { ntnApi } from "./ntn.js";
-import { SCHEMA, SELECT_DEFAULT, type PropertyDef } from "./schema.js";
+import { SCHEMA, SELECT_DEFAULT, buildViewConfiguration, type PropertyDef } from "./schema.js";
 
 const NOTION_API_VERSION = "2025-09-03";
 
@@ -133,9 +133,11 @@ export class NotionClient {
    * (Notion's `parent: { type: "workspace", workspace: true }` shape), which
    * is what most users want — no need to pre-create a parent page.
    *
-   * Notion orders database columns by property creation timestamp, so to
-   * keep a clean layout we create with just the title property, then call
-   * upgradeSchema() to add the rest one batch later.
+   * The DB initialises with only the two properties required by every
+   * skill — `Name` (title) and `Description`. Optional spec properties
+   * (Model, Agent, Effort, etc.) are added progressively by `migrate`
+   * when it sees skills that actually use them. This keeps the Notion
+   * UI from being a wall of empty columns.
    */
   async createSkillsDatabase(opts: {
     title: string;
@@ -146,12 +148,14 @@ export class NotionClient {
       : { type: "workspace", workspace: true };
 
     const titleProp = SCHEMA.find((p) => p.kind === "title")!;
+    const descriptionProp = SCHEMA.find((p) => p.notionName === "Description")!;
     const body = {
       parent,
       title: [{ type: "text", text: { content: opts.title } }],
       initial_data_source: {
         properties: {
           [titleProp.notionName]: { title: {} },
+          [descriptionProp.notionName]: propertyDefinitionPayload(descriptionProp),
         },
       },
     };
@@ -167,8 +171,11 @@ export class NotionClient {
     }
     const dataSourceId = created.data_sources[0]!.id;
 
-    // Add the rest of the schema in one PATCH for deterministic column order.
-    await this.upgradeSchema(dataSourceId);
+    // Set up the auto-provisioned default view's column order so Name +
+    // Description sit side-by-side. Fail-soft: a missing Views API or a
+    // stricter workspace shouldn't stop the user from getting a working
+    // database.
+    await this.reorderDefaultView(dataSourceId);
 
     return {
       id: created.id,
@@ -180,13 +187,53 @@ export class NotionClient {
   }
 
   /**
+   * Re-order the data source's default view to match SCHEMA's property
+   * order. Idempotent. Fail-soft — view-API issues never stop the
+   * outer flow.
+   *
+   * Used after createSkillsDatabase (initial pin) and after upgradeSchema
+   * adds new columns (so the columns appear in canonical order rather
+   * than whatever order Notion happens to materialise the PATCH in).
+   */
+  private async reorderDefaultView(dataSourceId: string): Promise<void> {
+    try {
+      const search = new URLSearchParams({ data_source_id: dataSourceId });
+      const list = await this.request<{
+        results?: { object: string; id: string }[];
+      }>("GET", `/v1/views?${search.toString()}`);
+      const viewId = list.results?.[0]?.id;
+      if (!viewId) return;
+
+      const dataSource = await this.getDataSource(dataSourceId);
+      const configuration = buildViewConfiguration(
+        dataSource.properties as Record<string, { id?: string }>,
+      );
+      if (configuration.properties.length === 0) return;
+
+      await this.request("PATCH", `/v1/views/${viewId}`, { configuration });
+    } catch (err) {
+      if (process.env.NOTION_SKILLS_DEBUG === "1") {
+        console.error("reorderDefaultView failed:", err);
+      }
+    }
+  }
+
+  /**
    * Reconcile the data source schema with src/schema.ts.
    * Idempotent. Two flavours of change:
    *   - Add a missing property
    *   - Convert a property whose Notion type doesn't match the schema kind
    *     (e.g. Agent went from rich_text to select between releases)
+   *
+   * Pass `options.only` to scope the reconciliation to a specific subset
+   * of Notion column names. Migrate uses this to add only the columns
+   * the about-to-upload skills actually need, instead of pre-populating
+   * every spec property up front.
    */
-  async upgradeSchema(dataSourceId: string): Promise<{
+  async upgradeSchema(
+    dataSourceId: string,
+    options: { only?: Set<string> } = {},
+  ): Promise<{
     added: string[];
     retyped: string[];
   }> {
@@ -197,6 +244,7 @@ export class NotionClient {
 
     for (const prop of SCHEMA) {
       if (prop.kind === "title") continue;
+      if (options.only && !options.only.has(prop.notionName)) continue;
       const existing = current.properties[prop.notionName] as
         | { type: string }
         | undefined;
@@ -219,6 +267,9 @@ export class NotionClient {
     await this.request("PATCH", `/v1/data_sources/${dataSourceId}`, {
       properties: additions,
     });
+    // Resync the default view so freshly-added columns slot into SCHEMA
+    // order instead of being appended in whatever order Notion picks.
+    await this.reorderDefaultView(dataSourceId);
     return { added, retyped };
   }
 

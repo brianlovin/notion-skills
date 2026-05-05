@@ -13,7 +13,7 @@ import {
   resolveSourceDirs,
   sourceIsInScope,
 } from "../migrate.js";
-import { SCHEMA } from "../schema.js";
+import { SCHEMA, notionPropsForSkill } from "../schema.js";
 import { findTargetByKey } from "../known-targets.js";
 import { ROOT_DIR } from "../paths.js";
 import { runSync, printSummary } from "../sync.js";
@@ -134,8 +134,9 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   }
 
   if (!opts.yes) {
+    const newWord = willCreate.length === 1 ? "page" : "pages";
     const ok = await confirm({
-      message: `Create ${willCreate.length} new page(s)${
+      message: `Create ${willCreate.length} new ${newWord}${
         willOverwrite.length ? ` and overwrite ${willOverwrite.length}` : ""
       } in "${scope.database_title ?? "Skills"}"?`,
       default: true,
@@ -146,9 +147,27 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
     }
   }
 
+  // Progressive schema: figure out which Notion columns the about-to-
+  // upload skills actually need, and add only those. Spec defaults
+  // (e.g. shell: bash) get filtered out by notionPropsForSkill so we
+  // don't surface columns where every cell would be the default.
+  const neededProps = new Set<string>();
+  for (const c of [...willCreate, ...willOverwrite]) {
+    if (c.kind !== "new" && c.kind !== "conflict") continue;
+    for (const name of notionPropsForSkill(
+      c.skill.properties as unknown as Record<string, unknown>,
+    )) {
+      neededProps.add(name);
+    }
+  }
+  if (neededProps.size > 0) {
+    await client.upgradeSchema(scope.data_source_id, { only: neededProps });
+  }
+
   // Self-heal select properties: any agent / model values referenced by
   // the migration that aren't already options on the data source need to
   // be added before the page-create call (Notion rejects unknown options).
+  // Must run AFTER upgradeSchema so the columns exist to attach options to.
   const selfHealing = collectSelfHealingValues([...willCreate, ...willOverwrite]);
   if (selfHealing.size > 0) {
     await client.ensureSelectOptions(scope.data_source_id, selfHealing);

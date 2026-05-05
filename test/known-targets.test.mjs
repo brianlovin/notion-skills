@@ -5,9 +5,18 @@ import { KNOWN_TARGETS, findTargetByKey } from "../dist/known-targets.js";
 
 const HOME = homedir();
 
-test("registry contains the v0.2 launch targets", () => {
+test("registry contains all supported targets", () => {
   const keys = KNOWN_TARGETS.map((t) => t.key).sort();
-  assert.deepEqual(keys.sort(), ["claude", "codex", "cursor", "gemini", "opencode"]);
+  assert.deepEqual(
+    keys,
+    ["agents", "claude", "codex", "cursor", "gemini", "opencode"],
+  );
+});
+
+test("agents target sorts first in registry order", () => {
+  // KNOWN_TARGETS order drives migrate's canonical-wins priority.
+  // The generic catch-all should win, so it must be index 0.
+  assert.equal(KNOWN_TARGETS[0].key, "agents");
 });
 
 test("every target has a non-empty label and dir", () => {
@@ -48,9 +57,15 @@ test("findTargetByKey: unknown returns undefined", () => {
   assert.equal(findTargetByKey("does-not-exist"), undefined);
 });
 
-test("each target has a docs URL", () => {
+test("each target with a docs URL is well-formed", () => {
+  // Docs are optional (the generic ~/.agents catch-all has no canonical
+  // doc page), but if a target ships one it must look like a URL.
   for (const t of KNOWN_TARGETS) {
-    assert.ok(t.docs, `${t.key} missing docs link`);
+    if (t.docs === undefined) continue;
     assert.match(t.docs, /^https?:\/\//);
   }
+});
+
+test("agents path", () => {
+  assert.equal(findTargetByKey("agents")?.dir, `${HOME}/.agents/skills`);
 });

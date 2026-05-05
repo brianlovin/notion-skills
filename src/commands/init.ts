@@ -1,6 +1,5 @@
 import chalk from "chalk";
 import { checkbox, input, select } from "@inquirer/prompts";
-import open from "open";
 import { NotionClient } from "../notion.js";
 import { writeScope } from "../scope.js";
 import { detectTargets } from "../targets.js";
@@ -16,14 +15,13 @@ import { pickLocalSkillsToUpload } from "./_pick-locals.js";
  * Wizard flow:
  *
  *   1. "Create a new database, or link an existing one?" (default = create)
- *   2. Auto-upgrade schema (no warnings — just make it right)
+ *   2. Reconcile minimum schema (Name + Description); rest is added by
+ *      migrate as skills with those properties show up
  *   3. Pick sync targets (parent dir of each known target gates default-on)
  *   4. Save scope
- *   5. For new DBs: open the freshly-created database in the browser so the
- *      user can start adding rows immediately
- *   6. Scan local skills NOT yet in the DB; if any exist, show preview and
- *      offer to upload them now via migrate
- *   7. Print summary with the DB URL and "next: notion-skills sync"
+ *   5. Scan local skills NOT yet in the DB; if any exist, show a
+ *      multiselect picker and offer to upload them via migrate
+ *   6. Print summary with the DB URL
  */
 export async function initCommand(): Promise<void> {
   await assertNtnInstalled();
@@ -44,13 +42,18 @@ export async function initCommand(): Promise<void> {
       ? { ...(await pickExistingDatabase(client)), isFresh: false }
       : { ...(await createNewDatabase(client)), isFresh: true };
 
-  // ---- 2. Auto-upgrade schema ------------------------------------------
-  process.stdout.write(chalk.dim("Reconciling schema... "));
-  const { added, retyped } = await client.upgradeSchema(dataSourceId);
-  if (added.length === 0 && retyped.length === 0) {
-    console.log(chalk.dim("up to date"));
-  } else {
-    console.log(chalk.green(`✓ added ${added.length}, retyped ${retyped.length}`));
+  // ---- 2. Make sure the minimum schema exists --------------------------
+  // Fresh DBs already have Name + Description from createSkillsDatabase.
+  // For linked DBs, ensure Description exists — anything else is added
+  // progressively by migrate as skills using those properties show up.
+  // Stay silent unless we actually changed something.
+  if (!isFresh) {
+    const { added, retyped } = await client.upgradeSchema(dataSourceId, {
+      only: new Set(["Description"]),
+    });
+    if (added.length || retyped.length) {
+      console.log(chalk.dim(`Added Description column to existing database.`));
+    }
   }
 
   // ---- 3. Targets -------------------------------------------------------
@@ -65,16 +68,7 @@ export async function initCommand(): Promise<void> {
   });
   console.log(chalk.green(`✓ Saved scope (targets: ${targets.join(", ")})`));
 
-  // ---- 5. Auto-open new DB in browser ----------------------------------
-  if (isFresh) {
-    try {
-      await open(databaseUrl);
-    } catch {
-      // best-effort; the URL is also printed below
-    }
-  }
-
-  // ---- 6. Detect local skills not yet in Notion ------------------------
+  // ---- 5. Detect local skills not yet in Notion ------------------------
   // Only scan dirs the user opted into as sync targets — surfacing a skill
   // from an unselected agent (e.g. ~/.cursor/skills when Cursor isn't a
   // target) would falsely suggest it'd get migrated, and migrate would

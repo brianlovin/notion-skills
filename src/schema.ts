@@ -51,7 +51,6 @@ export interface PropertyDef {
   selfHealing?: boolean;
 }
 
-const MODELS = ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001", "inherit"];
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 /**
@@ -131,12 +130,12 @@ export const SCHEMA: PropertyDef[] = [
     notionName: "Model",
     frontmatterKey: "model",
     kind: "select",
-    options: [
-      { name: SELECT_DEFAULT, color: "default" },
-      ...MODELS.map((m) => ({ name: m, color: "blue" })),
-    ],
+    // Options start empty; real model IDs are added when migrate encounters
+    // them. We don't ship a default list because we can't know which models
+    // a user wants to pin to. (selfHealing fills it as you go.)
+    options: [{ name: SELECT_DEFAULT, color: "default" }],
     selfHealing: true,
-    description: "Model override. Self-healing — new model IDs auto-added on migrate.",
+    description: "Model override. Self-healing — model IDs auto-added on migrate.",
   },
   {
     notionName: "Effort",
@@ -162,14 +161,12 @@ export const SCHEMA: PropertyDef[] = [
     notionName: "Agent",
     frontmatterKey: "agent",
     kind: "select",
-    options: [
-      { name: SELECT_DEFAULT, color: "default" },
-      { name: "general-purpose", color: "gray" },
-      { name: "Explore", color: "blue" },
-      { name: "Plan", color: "purple" },
-    ],
+    // Options start empty; subagent type names are added when migrate
+    // encounters them. We don't ship a default list because subagent
+    // names are project-specific.
+    options: [{ name: SELECT_DEFAULT, color: "default" }],
     selfHealing: true,
-    description: "Subagent type (used with context: fork). Self-healing — new options auto-added on sync.",
+    description: "Subagent type (used with context: fork). Self-healing — names auto-added on migrate.",
   },
   {
     notionName: "Shell",
@@ -202,4 +199,71 @@ export function findProperty(notionName: string): PropertyDef | undefined {
 
 export function findPropertyByFrontmatterKey(key: string): PropertyDef | undefined {
   return SCHEMA.find((p) => p.frontmatterKey === key);
+}
+
+/**
+ * Build the `configuration` payload for a Notion table view that pins
+ * Name to the left and lists every other property in SCHEMA order.
+ *
+ * Properties not present on the data source (i.e. progressive columns
+ * that haven't been added yet) are skipped — Notion would reject
+ * unknown property IDs.
+ */
+export interface ViewProperty {
+  property_id: string;
+  visible: boolean;
+}
+
+export interface ViewConfiguration {
+  type: "table";
+  properties: ViewProperty[];
+  frozen_column_index: number;
+}
+
+export function buildViewConfiguration(
+  propertiesByName: Record<string, { id?: string }>,
+): ViewConfiguration {
+  const ordered: ViewProperty[] = [];
+  for (const prop of SCHEMA) {
+    const found = propertiesByName[prop.notionName];
+    if (!found?.id) continue;
+    ordered.push({ property_id: found.id, visible: true });
+  }
+  return {
+    type: "table",
+    properties: ordered,
+    frozen_column_index: 1,
+  };
+}
+
+/**
+ * Given a single skill's frontmatter values, return the Notion column
+ * names that must exist on the data source for those values to be
+ * writable.
+ *
+ * - `name` and `description` are always present (the database is
+ *   created with them) so they're never returned.
+ * - Empty / unset values don't need a column.
+ * - Values matching a spec default also don't need a column — there's
+ *   no point in surfacing a column where every row repeats the default.
+ *
+ * Used by migrate to grow the schema progressively: users only see
+ * columns they're actually using.
+ */
+export function notionPropsForSkill(
+  properties: Record<string, unknown>,
+): Set<string> {
+  const out = new Set<string>();
+  for (const [key, value] of Object.entries(properties)) {
+    if (key === "name" || key === "description") continue;
+    if (value === undefined || value === null || value === "") continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    if (value === SELECT_DEFAULT) continue;
+    const specDefault = SPEC_DEFAULTS[key];
+    if (specDefault !== undefined && value === specDefault) continue;
+    const def = SCHEMA.find((p) => p.frontmatterKey === key);
+    if (!def) continue;
+    out.add(def.notionName);
+  }
+  return out;
 }
