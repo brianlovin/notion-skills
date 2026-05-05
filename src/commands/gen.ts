@@ -1,6 +1,8 @@
 import chalk from "chalk";
 import { spawn } from "node:child_process";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import { select } from "@inquirer/prompts";
 import { getScope, writeScope } from "../scope.js";
 import {
@@ -11,8 +13,13 @@ import {
   type GenAgentDef,
 } from "../gen-agents.js";
 import { buildGenPrompt } from "../gen-prompt.js";
-import { SKILLS_STORE } from "../paths.js";
-import { migrateCommand } from "./migrate.js";
+import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
+import { readManifest } from "../manifest.js";
+import {
+  ensureSymlink,
+  targetSkillPath,
+  targetsForKeys,
+} from "../targets.js";
 
 interface GenOptions {
   agent?: string;
@@ -51,6 +58,7 @@ export async function genCommand(
   }
 
   await mkdir(SKILLS_STORE, { recursive: true });
+  const skillsBefore = listSkillDirs(SKILLS_STORE);
 
   const prompt = buildGenPrompt(input);
   const { args, stdin } = buildAgentSpawnArgs(agent, prompt);
@@ -59,22 +67,85 @@ export async function genCommand(
   console.log(chalk.dim(`Input: ${truncate(input, 100)}`));
   console.log(
     chalk.dim(
-      `The agent will write a SKILL.md to ~/.notion-skills/skills/<slug>/ and exit. notion-skills will then push it to Notion.`,
+      `The agent will write a SKILL.md to ~/.notion-skills/skills/<slug>/ and exit. The new skill is local-first — review it, then run \`notion-skills publish <slug>\` to share with your team.`,
     ),
   );
   console.log("");
 
   await runAgent(agent, args, stdin);
 
-  // Always reconcile after the agent exits. Migrate is a no-op when
-  // every local skill is already in Notion, so it costs nothing in the
-  // happy case; in the recovery case (a previous gen left a local-only
-  // skill behind) it pushes what the user expected to ship. Don't try
-  // to detect "did this gen produce something new" — that's a guess
-  // and the user expects gen-then-migrate to be a single atomic step.
-  console.log("");
-  console.log(chalk.bold(`Pushing local skills to Notion...`));
-  await migrateCommand({ yes: true });
+  // Fan symlinks out to every configured target dir for any new
+  // central-store entry. This makes the draft immediately invokable
+  // (`/<slug>` in Claude Code, etc.) so the user can test before
+  // publishing. We don't push to Notion — that's the publish step.
+  const added = newSkillDirs(SKILLS_STORE, skillsBefore);
+  if (added.length > 0) {
+    const manifest = await readManifest(MANIFEST_FILE);
+    const trackedNames = new Set(
+      manifest ? Object.keys(manifest.skills) : [],
+    );
+    const targets = targetsForKeys(scope.targets);
+
+    for (const slug of added) {
+      const real = join(SKILLS_STORE, slug);
+      for (const t of targets) {
+        const link = targetSkillPath(t, slug);
+        await ensureSymlink(real, link);
+      }
+    }
+
+    console.log("");
+    const newDrafts = added.filter((s) => !trackedNames.has(s));
+    if (newDrafts.length === 1) {
+      console.log(
+        chalk.green(`✓ Drafted ${newDrafts[0]}.`) +
+          chalk.dim(` Test it locally, then run `) +
+          chalk.bold(`notion-skills publish ${newDrafts[0]}`) +
+          chalk.dim(` to share.`),
+      );
+    } else if (newDrafts.length > 1) {
+      console.log(chalk.green(`✓ Drafted ${newDrafts.length} skills:`));
+      for (const slug of newDrafts) {
+        console.log(`  ${chalk.dim("•")} ${slug}`);
+      }
+      console.log(
+        chalk.dim(`Test locally, then run `) +
+          chalk.bold(`notion-skills publish --all`) +
+          chalk.dim(` to share.`),
+      );
+    }
+  } else {
+    console.log("");
+    console.log(
+      chalk.dim(
+        `No new skill written. (Did the agent finish? Try \`notion-skills list --drafts\`.)`,
+      ),
+    );
+  }
+}
+
+function listSkillDirs(root: string): Set<string> {
+  if (!existsSync(root)) return new Set();
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return new Set();
+  }
+  return new Set(
+    entries.filter((e) => {
+      if (e.startsWith(".")) return false;
+      try {
+        return statSync(join(root, e)).isDirectory();
+      } catch {
+        return false;
+      }
+    }),
+  );
+}
+
+function newSkillDirs(root: string, before: Set<string>): string[] {
+  return [...listSkillDirs(root)].filter((name) => !before.has(name)).sort();
 }
 
 async function pickAgent(scopeTargets: string[]): Promise<string> {

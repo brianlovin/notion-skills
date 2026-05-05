@@ -48,9 +48,9 @@ test("buildGenPrompt: forbids the agent from running shell commands", () => {
   assert.match(out, /[Dd]o not run shell commands|do not run.*migrate/i);
 });
 
-test("buildGenPrompt: notionSkillsBin override threads through to the migrate-handoff message", () => {
+test("buildGenPrompt: notionSkillsBin override threads through to the publish-handoff message", () => {
   const out = buildGenPrompt("foo", { notionSkillsBin: "my-cli" });
-  assert.match(out, /my-cli will pick the new skill up/);
+  assert.match(out, /my-cli publish/);
 });
 
 test("buildGenPrompt: explains the URL/path/prompt branching", () => {

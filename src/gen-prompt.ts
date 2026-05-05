@@ -50,7 +50,7 @@ WHAT TO DO:
    - Reproduce the source material's key insights — don't just link to it.
    - For URLs, include the source URL at the bottom so users can reference the original.
 
-4. Once the file is written, you're done. Print a one-line summary and stop turning. {NOTION_SKILLS} will pick the new skill up automatically and push it to Notion.
+4. Once the file is written, you're done. Print a one-line summary mentioning the slug and stop turning. The skill is local-only at this point. The user will review it and run "{NOTION_SKILLS} publish <slug>" themselves to share it with their team — DO NOT do that for them.
 
 CONSTRAINTS:
 - Default to reasonable choices about scope, slug, and structure — don't ask clarifying questions about intent.
