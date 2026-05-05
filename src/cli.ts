@@ -13,6 +13,8 @@ import { migrateCommand } from "./commands/migrate.js";
 import { upgradeCommand } from "./commands/upgrade.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { genCommand } from "./commands/gen.js";
+import { publishCommand } from "./commands/publish.js";
+import { importCommand } from "./commands/import.js";
 
 // Read version from package.json so `--version` stays in sync with bumps
 // without us remembering to edit two places.
@@ -85,13 +87,36 @@ program
   .action(genCommand);
 
 program
-  .command("migrate")
-  .description("Push existing local skills into Notion, then sync back as symlinks")
+  .command("publish")
+  .description("Push a local skill to the workspace store. Pass slugs or --all.")
+  .argument("[slugs...]", "skill slugs to publish")
+  .option("--all", "publish every local-only skill in the central store")
+  .option("-y, --yes", "skip the confirmation prompt")
+  .action(publishCommand);
+
+program
+  .command("import")
+  .description("Bulk-import pre-existing local skills into the store (interactive multiselect)")
   .option("--from <path...>", "extra directories to scan, e.g. an old skills repo")
+  .option("-y, --yes", "skip the confirmation prompt")
+  .action(importCommand);
+
+program
+  .command("migrate", { hidden: true })
+  .description("[deprecated] Use `publish --all` or `import` instead")
+  .option("--from <path...>", "extra directories to scan")
   .option("--overwrite", "replace Notion pages whose slug matches a local skill")
   .option("--dry-run", "show what would happen without changing anything")
   .option("-y, --yes", "skip the confirmation prompt")
-  .action(migrateCommand);
+  .action(async (opts) => {
+    const chalk = (await import("chalk")).default;
+    console.warn(
+      chalk.yellow(
+        `\n[deprecated] \`notion-skills migrate\` will be removed in a future release. Use \`notion-skills publish --all\` (push local skills) or \`notion-skills import\` (bring in external skills) instead.\n`,
+      ),
+    );
+    await migrateCommand(opts);
+  });
 
 program.parseAsync(process.argv).catch(async (err) => {
   // ExitPromptError is what @inquirer/prompts throws on Ctrl-C — treat as
