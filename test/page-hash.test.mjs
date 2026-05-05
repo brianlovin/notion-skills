@@ -5,6 +5,7 @@ import {
   computeContentHashes,
   hashBehaviorProperties,
   hashBody,
+  hashSkillContent,
   readBehaviorPropertyBag,
 } from "../dist/page-hash.js";
 
@@ -129,4 +130,64 @@ test("computeContentHashes carries the version stamp", () => {
   assert.equal(result.hash_v, HASH_V);
   assert.equal(typeof result.props_hash, "string");
   assert.equal(typeof result.body_hash, "string");
+});
+
+// hashSkillContent — drift signal that covers parent body + sibling files.
+// Backward-compatible: with no files, equals hashBody.
+
+test("hashSkillContent: empty file list collapses to hashBody (backward compat)", () => {
+  // Pre-multifile-skills manifests don't have sibling files, and we
+  // mustn't migrate their hashes silently — they'd all show as drifted.
+  assert.equal(hashSkillContent("hello world", []), hashBody("hello world"));
+});
+
+test("hashSkillContent: stable across file ordering", () => {
+  const a = hashSkillContent("body", [
+    { path: "x.md", kind: "markdown", content: "x" },
+    { path: "y.md", kind: "markdown", content: "y" },
+  ]);
+  const b = hashSkillContent("body", [
+    { path: "y.md", kind: "markdown", content: "y" },
+    { path: "x.md", kind: "markdown", content: "x" },
+  ]);
+  assert.equal(a, b);
+});
+
+test("hashSkillContent: editing a sibling file changes the hash", () => {
+  const before = hashSkillContent("body", [
+    { path: "LANGUAGE.md", kind: "markdown", content: "v1" },
+  ]);
+  const after = hashSkillContent("body", [
+    { path: "LANGUAGE.md", kind: "markdown", content: "v2" },
+  ]);
+  assert.notEqual(before, after);
+});
+
+test("hashSkillContent: renaming a sibling file changes the hash", () => {
+  // Same content, different path = different identity.
+  const before = hashSkillContent("body", [
+    { path: "LANGUAGE.md", kind: "markdown", content: "x" },
+  ]);
+  const after = hashSkillContent("body", [
+    { path: "GLOSSARY.md", kind: "markdown", content: "x" },
+  ]);
+  assert.notEqual(before, after);
+});
+
+test("hashSkillContent: adding a sibling file changes the hash", () => {
+  const before = hashSkillContent("body", []);
+  const after = hashSkillContent("body", [
+    { path: "scripts/run.ts", kind: "code", lang: "typescript", content: "ok" },
+  ]);
+  assert.notEqual(before, after);
+});
+
+test("hashSkillContent: editing the parent body still changes the hash with files present", () => {
+  const before = hashSkillContent("v1", [
+    { path: "x.md", kind: "markdown", content: "x" },
+  ]);
+  const after = hashSkillContent("v2", [
+    { path: "x.md", kind: "markdown", content: "x" },
+  ]);
+  assert.notEqual(before, after);
 });

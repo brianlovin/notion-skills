@@ -172,6 +172,32 @@ function stripFencedBlock(body: string, _lang?: string): string {
  * store.
  */
 /**
+ * Drift signal for the local on-disk state of a skill. Combines the
+ * SKILL.md and every sibling file's content via hashSkillContent, so
+ * a local edit anywhere in the skill dir bumps the hash.
+ *
+ * Backward-compatible with hashContent(SKILL.md) for skills with no
+ * sibling files — when files=[], hashSkillContent collapses to the
+ * single-file hash.
+ */
+export async function hashLocalSkillDir(
+  skillDir: string,
+): Promise<string> {
+  const { readFile } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const { hashSkillContent } = await import("./page-hash.js");
+  let skillMd = "";
+  try {
+    skillMd = await readFile(join(skillDir, "SKILL.md"), "utf8");
+  } catch {
+    // Missing SKILL.md is a higher-level error; treat content as empty
+    // for hashing so callers see "different from anything we expect."
+  }
+  const files = await readLocalSkillFiles(skillDir);
+  return hashSkillContent(skillMd, files);
+}
+
+/**
  * Walk a local skill directory and collect every non-SKILL.md file
  * as a SkillFile. Recurses into subdirectories; skips dotfiles
  * (.DS_Store, .gitignore, etc.) and the SKILL.md itself.

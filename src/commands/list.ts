@@ -11,7 +11,7 @@ import {
 } from "../notion.js";
 import { assertNtnInstalled } from "../ntn.js";
 import { shouldSyncSkill } from "../filter.js";
-import { blocksToMarkdown, fetchBlockTree, slugify } from "../convert.js";
+import { fetchPageContent, slugify } from "../convert.js";
 import { getScope } from "../scope.js";
 import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
 import {
@@ -23,7 +23,7 @@ import {
 import {
   HASH_V,
   hashBehaviorProperties,
-  hashBody,
+  hashSkillContent,
 } from "../page-hash.js";
 import { readFile } from "node:fs/promises";
 
@@ -398,7 +398,13 @@ async function checkDrift(
   if ((manifest.hash_v ?? 1) < HASH_V) {
     return { outdated: false };
   }
-  if (page.last_edited_time === entry.last_edited_time) {
+  // Single-file skills can use the fast path: parent's last_edited_time
+  // is the authoritative drift signal because there are no children to
+  // edit. Multi-file skills MUST take the slow path — Notion doesn't
+  // bump the parent's last_edited_time when only a child page is
+  // edited, so the fast path would silently miss those changes.
+  const isMultiFile = (entry.files?.length ?? 0) > 0;
+  if (!isMultiFile && page.last_edited_time === entry.last_edited_time) {
     return { outdated: false };
   }
   const currentPropsHash = hashBehaviorProperties(page);
@@ -406,16 +412,20 @@ async function checkDrift(
     return { outdated: true };
   }
   // Props match but last_edited_time differs — could be a metadata-only
-  // edit (Installs, Tags), or a body edit. Need blocks to know.
+  // edit (Installs, Tags), a parent body edit, or an edit to one of
+  // the sibling-file child pages. Fetch the full content so we can
+  // hash everything together and compare.
   let body: string;
+  let files: import("../skill-files.js").SkillFile[];
   try {
-    const blocks = await fetchBlockTree(client, page.id);
-    body = blocksToMarkdown(blocks);
+    const result = await fetchPageContent(client, page);
+    body = result.body;
+    files = result.files;
   } catch {
-    // Block fetch failed — be conservative: don't flag drift, don't cache.
+    // Fetch failed — be conservative: don't flag drift, don't cache.
     return { outdated: false };
   }
-  const currentBodyHash = hashBody(body);
+  const currentBodyHash = hashSkillContent(body, files);
   if (entry.body_hash !== undefined && currentBodyHash !== entry.body_hash) {
     return { outdated: true };
   }

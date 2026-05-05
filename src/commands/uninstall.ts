@@ -1,15 +1,15 @@
 import chalk from "chalk";
 import { existsSync, lstatSync, readdirSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { confirm } from "@inquirer/prompts";
 import { getScope } from "../scope.js";
 import {
   type Manifest,
-  hashContent,
   readManifest,
   writeManifest,
 } from "../manifest.js";
+import { hashLocalSkillDir } from "../skill-files.js";
 import { NotionClient, readMultiSelect, readTitle } from "../notion.js";
 import { assertNtnInstalled } from "../ntn.js";
 import { slugify } from "../convert.js";
@@ -109,16 +109,19 @@ export async function uninstallCommand(
 
       if (existsSync(skillFile) && entry?.local_hash) {
         try {
-          const current = await readFile(skillFile, "utf8");
-          if (hashContent(current) !== entry.local_hash) {
+          const currentHash = await hashLocalSkillDir(skillDir);
+          if (currentHash !== entry.local_hash) {
             const backupDir = join(
               ROOT_DIR,
               "backup",
               `uninstall-${timestamp()}`,
               slug,
             );
-            await mkdir(backupDir, { recursive: true });
-            await writeFile(join(backupDir, "SKILL.md"), current, "utf8");
+            await mkdir(dirname(backupDir), { recursive: true });
+            // Copy the whole skill dir, so multi-file edits (siblings
+            // and SKILL.md alike) are preserved on uninstall, not just
+            // the SKILL.md.
+            await cp(skillDir, backupDir, { recursive: true });
           }
         } catch {
           // Backup is best-effort; never block the uninstall.

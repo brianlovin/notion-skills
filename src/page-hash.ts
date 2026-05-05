@@ -7,6 +7,7 @@ import {
   readSelect,
 } from "./notion.js";
 import { SCHEMA, type PropertyDef } from "./schema.js";
+import type { SkillFile } from "./skill-files.js";
 
 /**
  * Drift detection signal version. Bump when:
@@ -69,6 +70,31 @@ export function hashBehaviorProperties(page: NotionPage): string {
 
 export function hashBody(body: string): string {
   return hash(body);
+}
+
+/**
+ * Drift signal for the WHOLE skill — parent body plus every sibling
+ * file's content. Backward-compatible: with `files=[]`, the result
+ * equals `hashBody(body)`, so single-file skills keep their existing
+ * hash and don't trigger spurious drift on upgrade.
+ *
+ * Files are sorted by path so the hash is order-independent. Each
+ * file is delimited by a sentinel line including its path so that
+ * renaming a file (different path, same content) yields a different
+ * hash.
+ */
+export function hashSkillContent(
+  body: string,
+  files: SkillFile[],
+): string {
+  if (files.length === 0) return hash(body);
+  const sorted = [...files].sort((a, b) => a.path.localeCompare(b.path));
+  const parts: string[] = [body];
+  for (const f of sorted) {
+    parts.push(`\n---FILE:${f.path}---\n`);
+    parts.push(f.content);
+  }
+  return hash(parts.join(""));
 }
 
 export interface ContentHashes {

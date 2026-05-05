@@ -17,7 +17,11 @@ import {
   readManifest,
   writeManifest,
 } from "../manifest.js";
-import { HASH_V, hashBehaviorProperties, hashBody } from "../page-hash.js";
+import {
+  HASH_V,
+  hashBehaviorProperties,
+  hashSkillContent,
+} from "../page-hash.js";
 import {
   ensureSymlink,
   targetSkillPath,
@@ -232,8 +236,9 @@ export async function installCommand(
         page_id: skill.pageId,
         last_edited_time: skill.lastEditedTime,
         props_hash: hashBehaviorProperties(page),
-        body_hash: hashBody(skill.body),
-        local_hash: hashContent(md),
+        body_hash: hashSkillContent(skill.body, skill.files),
+        local_hash: hashSkillContent(md, skill.files),
+        files: skill.files.map((f) => f.path).sort(),
       };
 
       // Fan symlinks out to every configured target dir.

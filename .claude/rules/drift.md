@@ -8,16 +8,19 @@ The drift signal is content-based, not timestamp-based. A skill is "outdated" wh
 |---|---|---|
 | Body markdown edited in Notion | yes | changes what the agent reads |
 | Description / when_to_use / model / agent / allowed-tools / etc. | yes | changes how/when the model runs the skill |
+| **Child page edited in Notion** (multi-file skill) | yes | child = sibling file; covered by `body_hash` |
+| **Local sibling file edited / added / removed on disk** | yes | covered by `local_hash` (whole-dir hash) |
 | Tags edited | **no** | discovery sugar, doesn't affect execution |
 | Installs counter incremented | **no** | store-managed metric, not user content |
-| Local SKILL.md edited on disk | yes (different signal) | tracked by `local_hash`, surfaces as a publish reminder, not pull-outdated |
 
 The `taxonomyOnly` and `metricOnly` flags in `src/schema.ts` are what excludes Tags and Installs from `props_hash`. Don't add new excluded properties without thinking about the failure mode.
 
 ## Two-phase outdated check (`list`)
 
 1. **Fast path**: `page.last_edited_time === entry.last_edited_time` → not outdated. Most common case, no API calls.
-2. **Slow path**: `props_hash` differs → outdated. Else fetch blocks, compare `body_hash`. If both match, the page was touched by a metric or tag edit; cache the fresh `last_edited_time` + `body_hash` so the next `list` short-circuits on the fast path.
+2. **Slow path**: `props_hash` differs → outdated. Else fetch parent body + every child page, compare `hashSkillContent`. If both match, the page was touched by a metric or tag edit; cache the fresh `last_edited_time` + `body_hash` so the next `list` short-circuits on the fast path.
+
+**Multi-file skills always take the slow path.** Notion doesn't reliably bump the parent's `last_edited_time` when only a child page is edited, so the fast path can silently miss those edits. The manifest entry's `files: string[]` carries the list of sibling files; whenever it's non-empty, drift checks fetch children unconditionally. Same rule applies in `sync.ts`: every multi-file skill is force-included in the refetch set.
 
 `list` writing to the manifest is intentional (transparent perf cache update). The next run is faster; the data on disk is always at least as fresh.
 

@@ -14,9 +14,14 @@ import {
   readManifest,
   writeManifest,
 } from "../manifest.js";
-import { HASH_V, hashBehaviorProperties, hashBody } from "../page-hash.js";
+import {
+  HASH_V,
+  hashBehaviorProperties,
+  hashSkillContent,
+} from "../page-hash.js";
 import { NotionClient } from "../notion.js";
 import {
+  hashLocalSkillDir,
   readLocalSkillFiles,
   renderForChildPage,
   type SkillFile,
@@ -250,8 +255,12 @@ async function pushUpdates(
         page_id: p.pageId,
         last_edited_time: converted.skill.lastEditedTime,
         props_hash: hashBehaviorProperties(fresh),
-        body_hash: hashBody(converted.skill.body),
-        local_hash: hashContent(md),
+        body_hash: hashSkillContent(
+          converted.skill.body,
+          converted.skill.files,
+        ),
+        local_hash: hashSkillContent(md, converted.skill.files),
+        files: converted.skill.files.map((f) => f.path).sort(),
       };
     } catch {
       // Refresh failure is non-fatal; the next sync reconciles.
@@ -328,20 +337,20 @@ async function upsertChildPages(
 }
 
 /**
- * Walk the manifest, hash each local SKILL.md, return slugs whose
- * content has drifted from `local_hash`. These are the candidates for
- * `publish --all`'s update half.
+ * Walk the manifest and return slugs whose on-disk content has drifted
+ * from the recorded `local_hash`. The hash covers the full skill dir
+ * (SKILL.md + every sibling file), so editing a sibling, adding a new
+ * file, or deleting an existing one all show up as drift.
  */
 async function detectDriftedInstalled(manifest: Manifest): Promise<string[]> {
   const drifted: string[] = [];
-  const { readFile } = await import("node:fs/promises");
   for (const [name, entry] of Object.entries(manifest.skills)) {
     if (entry.local_hash === undefined) continue;
-    const file = join(SKILLS_STORE, name, "SKILL.md");
-    if (!existsSync(file)) continue;
+    const skillDir = join(SKILLS_STORE, name);
+    if (!existsSync(join(skillDir, "SKILL.md"))) continue;
     try {
-      const raw = await readFile(file, "utf8");
-      if (hashContent(raw) !== entry.local_hash) drifted.push(name);
+      const currentHash = await hashLocalSkillDir(skillDir);
+      if (currentHash !== entry.local_hash) drifted.push(name);
     } catch {
       // unreadable; skip
     }

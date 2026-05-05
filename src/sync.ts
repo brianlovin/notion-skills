@@ -27,7 +27,7 @@ import {
 import {
   HASH_V,
   hashBehaviorProperties,
-  hashBody,
+  hashSkillContent,
 } from "./page-hash.js";
 import { materializeFiles } from "./skill-files.js";
 import {
@@ -194,6 +194,20 @@ export async function runSync(
     })),
   );
 
+  // Multi-file skills can't trust the parent's last_edited_time as a
+  // change signal — Notion doesn't always bump it when only a child
+  // page is edited. Force-include every tracked multi-file skill in
+  // the refetch set so child-only edits are caught on every sync.
+  for (const [name, entry] of Object.entries(oldManifest.skills)) {
+    if ((entry.files?.length ?? 0) === 0) continue;
+    const summary = kept.find((k) => k.name === name);
+    if (summary && !diff.toFetch.includes(summary.id)) {
+      diff.toFetch.push(summary.id);
+      const idx = diff.unchanged.indexOf(name);
+      if (idx >= 0) diff.unchanged.splice(idx, 1);
+    }
+  }
+
   // ---- Detect local edits (drift in SKILL.md content hashes) -----------
   //
   // For each skill the manifest tracks, hash the current SKILL.md and
@@ -331,8 +345,9 @@ export async function runSync(
       page_id: skill.pageId,
       last_edited_time: skill.lastEditedTime,
       props_hash: matchingSummary?.propsHash ?? "",
-      body_hash: hashBody(skill.body),
-      local_hash: hashContent(md),
+      body_hash: hashSkillContent(skill.body, skill.files),
+      local_hash: hashSkillContent(md, skill.files),
+      files: skill.files.map((f) => f.path).sort(),
     };
 
     const mark = wasNew ? chalk.green("+") : chalk.cyan("↓");

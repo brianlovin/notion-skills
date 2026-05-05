@@ -1,7 +1,8 @@
 import { existsSync, lstatSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { hashContent, type Manifest } from "./manifest.js";
+import { type Manifest } from "./manifest.js";
+import { hashLocalSkillDir } from "./skill-files.js";
 
 /**
  * One entry in the drift map: the local SKILL.md's content hash differs
@@ -41,7 +42,8 @@ export async function detectLocalState(
   const missingPageIds = new Set<string>();
 
   for (const [name, entry] of Object.entries(manifest.skills)) {
-    const file = join(contentRoot, name, "SKILL.md");
+    const skillDir = join(contentRoot, name);
+    const file = join(skillDir, "SKILL.md");
     if (!existsSync(file)) {
       // Force a pull so users can recover by `rm`-ing a corrupt or unwanted
       // local copy. We don't try to diff a file that isn't there.
@@ -53,17 +55,19 @@ export async function detectLocalState(
       continue;
     }
 
-    let raw: string;
+    let currentHash: string;
     try {
-      raw = await readFile(file, "utf8");
+      currentHash = await hashLocalSkillDir(skillDir);
     } catch {
       continue;
     }
-    if (hashContent(raw) === entry.local_hash) continue;
+    if (currentHash === entry.local_hash) continue;
 
     let mtime: Date;
+    let raw: string;
     try {
       mtime = lstatSync(file).mtime;
+      raw = await readFile(file, "utf8");
     } catch {
       continue;
     }

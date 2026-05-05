@@ -1,11 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   classifyExtension,
+  hashLocalSkillDir,
   isSafeRelativePath,
   parseFromChildPage,
+  readLocalSkillFiles,
   renderForChildPage,
 } from "../dist/skill-files.js";
+import { hashSkillContent } from "../dist/page-hash.js";
 
 // classifyExtension —————————————————————————————————————————————————
 
@@ -150,4 +156,116 @@ test("SKILL.md at the root is reserved (parent body, not a sibling file)", () =>
   // But nested SKILL.md (in a subdir) is fine — that's a sub-skill,
   // not the root parent.
   assert.equal(isSafeRelativePath("subdir/SKILL.md"), true);
+});
+
+// readLocalSkillFiles + hashLocalSkillDir — disk-walking helpers.
+
+async function makeSkillDir(layout) {
+  const dir = await mkdtemp(join(tmpdir(), "notion-skills-test-"));
+  for (const [path, content] of Object.entries(layout)) {
+    const full = join(dir, path);
+    await mkdir(join(full, "..").endsWith("/.") ? dir : join(full, ".."), {
+      recursive: true,
+    });
+    await writeFile(full, content, "utf8");
+  }
+  return dir;
+}
+
+test("readLocalSkillFiles: SKILL.md is excluded; siblings are surfaced", async () => {
+  const dir = await makeSkillDir({
+    "SKILL.md": "---\nname: x\ndescription: y\n---\n\nbody",
+    "LANGUAGE.md": "lang content",
+    "scripts/run.ts": "console.log('hi');",
+  });
+  try {
+    const files = await readLocalSkillFiles(dir);
+    const paths = files.map((f) => f.path).sort();
+    assert.deepEqual(paths, ["LANGUAGE.md", "scripts/run.ts"]);
+    const lang = files.find((f) => f.path === "LANGUAGE.md");
+    assert.equal(lang.kind, "markdown");
+    assert.equal(lang.content, "lang content");
+    const script = files.find((f) => f.path === "scripts/run.ts");
+    assert.equal(script.kind, "code");
+    assert.equal(script.lang, "typescript");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("readLocalSkillFiles: dotfiles are skipped", async () => {
+  const dir = await makeSkillDir({
+    "SKILL.md": "x",
+    ".DS_Store": "garbage",
+    ".gitignore": "*.log",
+    "LANGUAGE.md": "real",
+  });
+  try {
+    const files = await readLocalSkillFiles(dir);
+    assert.deepEqual(files.map((f) => f.path), ["LANGUAGE.md"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("hashLocalSkillDir: agrees with hashSkillContent on the same content", async () => {
+  const skillMd = "---\nname: x\ndescription: y\n---\n\nbody text";
+  const langContent = "lang content";
+  const dir = await makeSkillDir({
+    "SKILL.md": skillMd,
+    "LANGUAGE.md": langContent,
+  });
+  try {
+    const fromDir = await hashLocalSkillDir(dir);
+    const expected = hashSkillContent(skillMd, [
+      { path: "LANGUAGE.md", kind: "markdown", content: langContent },
+    ]);
+    assert.equal(fromDir, expected);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("hashLocalSkillDir: editing a sibling changes the hash", async () => {
+  const dir = await makeSkillDir({
+    "SKILL.md": "x",
+    "LANGUAGE.md": "v1",
+  });
+  try {
+    const before = await hashLocalSkillDir(dir);
+    await writeFile(join(dir, "LANGUAGE.md"), "v2", "utf8");
+    const after = await hashLocalSkillDir(dir);
+    assert.notEqual(before, after);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("hashLocalSkillDir: adding a new sibling file changes the hash", async () => {
+  const dir = await makeSkillDir({
+    "SKILL.md": "x",
+  });
+  try {
+    const before = await hashLocalSkillDir(dir);
+    await writeFile(join(dir, "NEW.md"), "added", "utf8");
+    const after = await hashLocalSkillDir(dir);
+    assert.notEqual(before, after);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("hashLocalSkillDir: removing a sibling changes the hash", async () => {
+  const dir = await makeSkillDir({
+    "SKILL.md": "x",
+    "LANGUAGE.md": "y",
+  });
+  try {
+    const before = await hashLocalSkillDir(dir);
+    await rm(join(dir, "LANGUAGE.md"));
+    const after = await hashLocalSkillDir(dir);
+    assert.notEqual(before, after);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

@@ -35,6 +35,14 @@ export interface ManifestEntry {
    * stores it on next write without firing a spurious push.
    */
   local_hash?: string;
+  /**
+   * Relative paths of sibling files round-tripped through Notion as
+   * child pages. When present and non-empty, the skill is multi-file
+   * and `list`'s drift check always takes the slow path — parent's
+   * `last_edited_time` doesn't bump on child-only edits, so the fast
+   * path can't see them.
+   */
+  files?: string[];
 }
 
 export interface Manifest {

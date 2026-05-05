@@ -107,25 +107,7 @@ export async function convertPageToSkill(
   const description = readRichText(page.properties, "Description");
   if (!description) return { ok: false, reason: `missing "Description" property` };
 
-  const blocks = await fetchBlockTree(client, page.id);
-
-  // Multi-file skills: child_page blocks at the top level represent
-  // sibling files in the skill directory. Partition them out so the
-  // parent body doesn't carry their reference markers, then fetch
-  // each child's content separately. Nested child_pages (inside
-  // columns, toggles, etc.) aren't supported in v1.
-  const childPageBlocks = blocks.filter((b) => b.type === "child_page");
-  const bodyBlocks = blocks.filter((b) => b.type !== "child_page");
-  const body = renderBlocks(bodyBlocks, 0);
-
-  const files: SkillFile[] = [];
-  for (const cp of childPageBlocks) {
-    const childTitle = readChildPageTitle(cp);
-    if (!childTitle) continue;
-    const childBlocks = await fetchBlockTree(client, cp.id);
-    const childBody = renderBlocks(childBlocks, 0);
-    files.push(parseFromChildPage(childTitle, childBody));
-  }
+  const { body, files } = await fetchPageContent(client, page);
 
   const properties = readSkillPropertiesFromPage(page, slugify(title), description);
   return {
@@ -144,6 +126,34 @@ function readChildPageTitle(block: NotionBlock): string | null {
   const inner = (block as { child_page?: { title?: string } }).child_page;
   const t = inner?.title?.trim();
   return t && t.length > 0 ? t : null;
+}
+
+/**
+ * Fetch a page's body markdown plus every sibling file expressed as a
+ * top-level child page. Pure read — no validation. Used by:
+ *   - convertPageToSkill (after validating description)
+ *   - list's drift slow-path (which only needs body + files for hashing)
+ *
+ * Nested child_pages (inside columns, toggles, etc.) are NOT supported
+ * in v1: they're treated as inline content, not sibling files.
+ */
+export async function fetchPageContent(
+  client: NotionClient,
+  page: NotionPage,
+): Promise<{ body: string; files: SkillFile[] }> {
+  const blocks = await fetchBlockTree(client, page.id);
+  const childPageBlocks = blocks.filter((b) => b.type === "child_page");
+  const bodyBlocks = blocks.filter((b) => b.type !== "child_page");
+  const body = renderBlocks(bodyBlocks, 0);
+  const files: SkillFile[] = [];
+  for (const cp of childPageBlocks) {
+    const childTitle = readChildPageTitle(cp);
+    if (!childTitle) continue;
+    const childBlocks = await fetchBlockTree(client, cp.id);
+    const childBody = renderBlocks(childBlocks, 0);
+    files.push(parseFromChildPage(childTitle, childBody));
+  }
+  return { body, files };
 }
 
 /**
