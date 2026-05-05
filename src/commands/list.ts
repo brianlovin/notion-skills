@@ -200,8 +200,27 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
   }
 
   // Human / agent-friendly text output.
+  const isFiltered =
+    options.installed ||
+    options.available ||
+    options.outdated ||
+    options.drafts ||
+    (options.tag && options.tag.length > 0);
   console.log(chalk.bold(`\n${scope.database_title ?? scope.database_id}`));
-  console.log(chalk.dim(`${rows.length} ${rows.length === 1 ? "skill" : "skills"} total`));
+  if (isFiltered) {
+    if (filtered.length === 0) {
+      console.log(chalk.dim(`No skills match the filter.`));
+      console.log("");
+      return;
+    }
+    console.log(
+      chalk.dim(
+        `${filtered.length} of ${rows.length} ${rows.length === 1 ? "skill" : "skills"} match.`,
+      ),
+    );
+  } else {
+    console.log(chalk.dim(`${rows.length} ${rows.length === 1 ? "skill" : "skills"} total`));
+  }
   console.log("");
 
   for (const row of filtered) {
@@ -267,6 +286,23 @@ function readFmString(fm: string, key: string): string {
 }
 
 function readFmList(fm: string, key: string): string[] {
+  // Try the block form first — `key:` on its own line followed by
+  // indented `- value` lines. The previous "inline first" approach
+  // missed this case because the inline regex requires content after
+  // the colon, and YAML's block-list form has nothing after the colon.
+  const blockRe = new RegExp(
+    `^${key}\\s*:\\s*\\r?\\n((?:[ \\t]+-\\s+.+\\r?\\n?)+)`,
+    "m",
+  );
+  const block = fm.match(blockRe);
+  if (block && block[1]) {
+    return block[1]
+      .split("\n")
+      .map((line) => line.replace(/^[ \t]+-\s+/, "").trim())
+      .filter(Boolean);
+  }
+
+  // Fall back to inline forms: `key: [a, b]`, `key: a, b`, `key: x`.
   const inline = new RegExp(`^${key}\\s*:\\s*(.+)$`, "m");
   const m = fm.match(inline);
   if (!m || m[1] === undefined) return [];
@@ -279,15 +315,5 @@ function readFmList(fm: string, key: string): string[] {
     }
   }
   if (value.startsWith("-")) return [];
-  if (value === "") {
-    // YAML list form, look for following indented lines.
-    const blockRe = new RegExp(`^${key}\\s*:\\s*\\n((?:\\s+-\\s+.+\\n?)+)`, "m");
-    const block = fm.match(blockRe);
-    if (!block || !block[1]) return [];
-    return block[1]
-      .split("\n")
-      .map((line) => line.replace(/^\s+-\s+/, "").trim())
-      .filter(Boolean);
-  }
   return value.split(/\s*,\s*/).filter(Boolean);
 }

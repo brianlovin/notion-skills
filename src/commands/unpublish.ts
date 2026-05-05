@@ -5,6 +5,8 @@ import { NotionClient, readTitle } from "../notion.js";
 import { assertNtnInstalled } from "../ntn.js";
 import { ntnApi } from "../ntn.js";
 import { slugify } from "../convert.js";
+import { readManifest, writeManifest } from "../manifest.js";
+import { MANIFEST_FILE } from "../paths.js";
 
 interface UnpublishOptions {
   yes?: boolean;
@@ -70,10 +72,21 @@ export async function unpublishCommand(
   // ntn's PATCH /v1/pages with in_trash: true archives the page.
   await ntnApi("PATCH", `/v1/pages/${match.id}`, { in_trash: true }, "2025-09-03");
 
+  // Drop the manifest entry too — the skill is no longer in the store,
+  // so it shouldn't be tracked as installed. Local copy stays on disk
+  // (effectively a draft); user can re-publish or uninstall.
+  const manifest = await readManifest(MANIFEST_FILE);
+  if (manifest && manifest.skills[slug]) {
+    const next = { ...manifest, skills: { ...manifest.skills } };
+    delete next.skills[slug];
+    next.last_synced_at = new Date().toISOString();
+    await writeManifest(MANIFEST_FILE, next);
+  }
+
   console.log(chalk.green(`✓ Unpublished ${slug}.`));
   console.log(
     chalk.dim(
-      `  Notion's page history can restore it. Your local copy is unchanged — run \`notion-skills uninstall ${slug}\` to remove it from this machine.`,
+      `  Notion's page history can restore it. Your local copy is preserved as a draft — run \`notion-skills publish ${slug}\` to re-publish or \`notion-skills uninstall ${slug}\` to remove it from this machine.`,
     ),
   );
 }

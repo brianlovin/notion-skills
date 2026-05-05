@@ -120,17 +120,28 @@ async function checkSchema(scope: Scope): Promise<CheckResult[]> {
     const client = new NotionClient();
     const ds = await client.getDataSource(scope.data_source_id);
     const present = new Set(Object.keys(ds.properties));
-    const missing = SCHEMA.filter(
-      (p) => p.kind !== "title" && !present.has(p.notionName),
-    );
-    if (missing.length === 0) {
-      return [{ status: "ok", label: "Schema matches notion-skills spec" }];
+    // Hard requirements: Name + Description. Without these the store
+    // can't function. Everything else is added progressively when a
+    // skill that uses it gets published — absent properties aren't a
+    // problem, they're the design.
+    const required = ["Name", "Description"];
+    const missingRequired = required.filter((name) => !present.has(name));
+    if (missingRequired.length > 0) {
+      return [
+        {
+          status: "fail",
+          label: `Store missing required ${missingRequired.length === 1 ? "property" : "properties"}: ${missingRequired.join(", ")}`,
+          detail: "Run `notion-skills init` against this database to repair, or recreate the store.",
+        },
+      ];
     }
+    const optionalPresent = SCHEMA.filter(
+      (p) => p.kind !== "title" && p.notionName !== "Description" && present.has(p.notionName),
+    ).length;
     return [
       {
-        status: "warn",
-        label: `Schema missing ${missing.length} ${missing.length === 1 ? "property" : "properties"}: ${missing.map((m) => m.notionName).join(", ")}`,
-        detail: "Run `notion-skills upgrade` to add them.",
+        status: "ok",
+        label: `Store schema is healthy (Name + Description + ${optionalPresent} optional)`,
       },
     ];
   } catch (err) {
@@ -178,17 +189,13 @@ async function checkManifestVsDisk(_scope: Scope): Promise<CheckResult[]> {
   });
 
   if (orphans.length > 0) {
-    const word = orphans.length === 1 ? "dir" : "dirs";
+    // Under the v0.5 app-store model these aren't orphans — they're
+    // drafts (local skills not yet published). Surface as info, not a
+    // warning, and don't suggest removing them.
     out.push({
-      status: "warn",
-      label: `${orphans.length} central-store ${word} not in manifest: ${orphans.slice(0, 5).join(", ")}${orphans.length > 5 ? "…" : ""}`,
-      detail: "Probably stale from a previous DB. Safe to remove.",
-      fix: async () => {
-        for (const name of orphans) {
-          await rm(join(contentRoot, name), { recursive: true, force: true });
-        }
-        return `Removed ${orphans.length} orphaned central-store ${word}`;
-      },
+      status: "ok",
+      label: `${orphans.length} ${orphans.length === 1 ? "draft" : "drafts"} (local-only, not yet published): ${orphans.slice(0, 5).join(", ")}${orphans.length > 5 ? "…" : ""}`,
+      detail: `Run \`notion-skills publish <slug>\` to share with your team, or \`notion-skills uninstall <slug>\` to discard.`,
     });
   }
 

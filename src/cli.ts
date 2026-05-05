@@ -47,12 +47,12 @@ program
 
 program
   .command("init")
-  .description("Configure a Skills database for sync")
+  .description("Connect to (or create) your workspace skill store")
   .action(initCommand);
 
 program
   .command("sync")
-  .description("Sync skills from Notion to local agent directories")
+  .description("Pull updates for skills you have installed (pull-only — use `publish` to push)")
   .action(syncCommand);
 
 program

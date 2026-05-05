@@ -313,14 +313,17 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   // ---------- Summary ----------
   const totalDone = created.length + updated.length;
   console.log("");
+  // Verb is "Published" not "Migrated" — every code path that calls
+  // this is now in service of `publish`. Migrate is a hidden alias
+  // and even there the user-facing intent is "I'm publishing skills."
   if (failed.length === 0) {
     console.log(
-      chalk.green(`✓ Migrated ${totalDone} ${totalDone === 1 ? "skill" : "skills"}.`),
+      chalk.green(`✓ Published ${totalDone} ${totalDone === 1 ? "skill" : "skills"}.`),
     );
   } else {
     console.log(
       chalk.yellow(
-        `Migrated ${totalDone} of ${totalDone + failed.length} skills (${failed.length} failed):`,
+        `Published ${totalDone} of ${totalDone + failed.length} skills (${failed.length} failed):`,
       ),
     );
     for (const name of failed) console.log(`  ${chalk.red("✗")} ${name}`);
