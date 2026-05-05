@@ -223,13 +223,29 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
   }
   console.log("");
 
+  // Pad names to the longest in the filtered set (capped at 40) instead
+  // of always padding to 40. Saves a lot of horizontal space when the
+  // skill names are short.
+  const maxName = Math.max(0, ...filtered.map((r) => r.name.length));
+  const namePad = Math.min(40, Math.max(maxName, 12));
+  const cols = process.stdout.columns ?? 120;
+  // Fixed prefix: "  ✓ " (4) + name (namePad) + " " (1) = namePad + 5
+  // Suffix budget for tags is variable per row; we subtract it before
+  // truncating the description, so longer tag lists get less description.
+  const prefixWidth = 5 + namePad;
+
   for (const row of filtered) {
     const mark = stateMarker(row.state);
-    const namePadded = row.name.padEnd(40);
-    const desc = truncate(oneLine(row.description), Math.max(20, (process.stdout.columns ?? 100) - 70));
-    const tagText =
-      row.tags.length > 0 ? ` ${chalk.dim(`[${row.tags.join(", ")}]`)}` : "";
-    const reason = row.reason ? chalk.dim(` (${row.reason})`) : "";
+    const namePadded = row.name.padEnd(namePad);
+    const tagPlain = row.tags.length > 0 ? ` [${row.tags.join(", ")}]` : "";
+    const reasonPlain = row.reason ? ` (${row.reason})` : "";
+    const descBudget = Math.max(
+      20,
+      cols - prefixWidth - tagPlain.length - reasonPlain.length - 2,
+    );
+    const desc = truncate(oneLine(row.description), descBudget);
+    const tagText = tagPlain ? chalk.dim(tagPlain) : "";
+    const reason = reasonPlain ? chalk.dim(reasonPlain) : "";
     console.log(`  ${mark} ${namePadded} ${chalk.dim(desc)}${tagText}${reason}`);
   }
 

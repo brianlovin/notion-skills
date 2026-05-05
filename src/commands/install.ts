@@ -109,16 +109,24 @@ export async function installCommand(
 
   // Filter out already-installed (idempotent install --all / --tag).
   const newCandidates = candidates.filter((c) => !trackedNames.has(c.name));
-  const alreadyInstalled = candidates.length - newCandidates.length;
+  const alreadyInstalled = candidates.filter((c) => trackedNames.has(c.name));
 
   if (newCandidates.length === 0) {
-    console.log(
-      chalk.dim(
-        alreadyInstalled > 0
-          ? `All ${alreadyInstalled} matching ${alreadyInstalled === 1 ? "skill is" : "skills are"} already installed. Nothing to do.`
-          : `No matching skills found.`,
-      ),
-    );
+    if (alreadyInstalled.length === 0) {
+      console.log(chalk.dim("No matching skills found."));
+    } else if (alreadyInstalled.length === 1) {
+      // Direct `install <slug>` on an already-installed skill — name
+      // the skill explicitly instead of "All 1 matching skill is …".
+      console.log(
+        chalk.dim(`${alreadyInstalled[0]!.name} is already installed.`),
+      );
+    } else {
+      console.log(
+        chalk.dim(
+          `All ${alreadyInstalled.length} matching skills are already installed.`,
+        ),
+      );
+    }
     return;
   }
 
@@ -192,9 +200,9 @@ export async function installCommand(
   await writeManifest(MANIFEST_FILE, nextManifest);
   console.log("");
   console.log(chalk.green(`✓ Installed ${newCandidates.length} ${newCandidates.length === 1 ? "skill" : "skills"}.`));
-  if (alreadyInstalled > 0) {
+  if (alreadyInstalled.length > 0) {
     console.log(
-      chalk.dim(`  (${alreadyInstalled} already installed, skipped.)`),
+      chalk.dim(`  (${alreadyInstalled.length} already installed, skipped.)`),
     );
   }
 }
