@@ -1,6 +1,6 @@
 import chalk from "chalk";
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import {
   NotionClient,
   readMultiSelect,
@@ -10,12 +10,8 @@ import { assertNtnInstalled } from "../ntn.js";
 import { decide } from "../filter.js";
 import { slugify } from "../convert.js";
 import { getScope } from "../scope.js";
-import {
-  PROJECT_SKILLS_RELATIVE,
-  SKILLS_STORE,
-} from "../paths.js";
+import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
 import { readManifest } from "../manifest.js";
-import { MANIFEST_FILE, PROJECT_LOCK_FILENAME } from "../paths.js";
 
 const TAGS_PROPERTY = "Tags";
 
@@ -31,23 +27,10 @@ export async function listCommand(): Promise<void> {
   const client = new NotionClient();
   const pages = await client.queryDataSource(scope.data_source_id);
 
-  const manifestPath =
-    scope.type === "global"
-      ? MANIFEST_FILE
-      : resolve(scope.root, PROJECT_LOCK_FILENAME);
-  const manifest = await readManifest(manifestPath);
+  const manifest = await readManifest(MANIFEST_FILE);
+  const contentRoot = SKILLS_STORE;
 
-  const contentRoot =
-    scope.type === "global"
-      ? SKILLS_STORE
-      : resolve(scope.root, PROJECT_SKILLS_RELATIVE);
-
-  console.log(
-    chalk.bold(
-      `\n${scope.database_title ?? scope.database_id}` +
-        chalk.dim(` (${scope.type} scope)`),
-    ),
-  );
+  console.log(chalk.bold(`\n${scope.database_title ?? scope.database_id}`));
   console.log(chalk.dim(`${pages.length} pages\n`));
 
   type Row = {

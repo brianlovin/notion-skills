@@ -2,13 +2,8 @@ import chalk from "chalk";
 import { confirm } from "@inquirer/prompts";
 import { existsSync } from "node:fs";
 import { mkdir, rename } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-import {
-  findProjectScopePath,
-  getScope,
-  writeGlobalScope,
-  writeProjectScope,
-} from "../scope.js";
+import { dirname, join } from "node:path";
+import { getScope, writeScope } from "../scope.js";
 import { NotionClient } from "../notion.js";
 import { assertNtnInstalled, ntnSetPageMarkdown } from "../ntn.js";
 import {
@@ -20,7 +15,7 @@ import {
 } from "../migrate.js";
 import { SCHEMA } from "../schema.js";
 import { findTargetByKey } from "../known-targets.js";
-import { PROJECT_SKILLS_RELATIVE, ROOT_DIR } from "../paths.js";
+import { ROOT_DIR } from "../paths.js";
 import { runSync, printSummary } from "../sync.js";
 
 interface MigrateOptions {
@@ -41,18 +36,13 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   }
 
   // Resolve sources.
-  const scopeTargetDirs =
-    scope.type === "global"
-      ? scope.targets
-          .map((k) => findTargetByKey(k)?.dir)
-          .filter((d): d is string => !!d)
-      : [resolve(scope.root, PROJECT_SKILLS_RELATIVE)];
+  const scopeTargetDirs = scope.targets
+    .map((k) => findTargetByKey(k)?.dir)
+    .filter((d): d is string => !!d);
 
-  const sourceDirs = resolveSourceDirs(scope.type, {
+  const sourceDirs = resolveSourceDirs({
     extras: opts.from ?? [],
-    targetDirs: scope.type === "global" ? scopeTargetDirs : undefined,
-    projectSkillsDir:
-      scope.type === "project" ? scopeTargetDirs[0] : undefined,
+    targetDirs: scopeTargetDirs,
   });
 
   console.log(chalk.bold(`Sources:`));
@@ -258,22 +248,13 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
     ...scope.filter,
     include_skills: [...newIncludeSkills],
   };
-  if (scope.type === "global") {
-    await writeGlobalScope({
-      database_id: scope.database_id,
-      data_source_id: scope.data_source_id,
-      database_title: scope.database_title,
-      targets: scope.targets,
-      filter: updatedFilter,
-    });
-  } else {
-    await writeProjectScope(scope.root, {
-      database_id: scope.database_id,
-      data_source_id: scope.data_source_id,
-      database_title: scope.database_title,
-      filter: updatedFilter,
-    });
-  }
+  await writeScope({
+    database_id: scope.database_id,
+    data_source_id: scope.data_source_id,
+    database_title: scope.database_title,
+    targets: scope.targets,
+    filter: updatedFilter,
+  });
   if (newIncludeSkills.size > (scope.filter.include_skills?.length ?? 0)) {
     console.log(
       chalk.dim(

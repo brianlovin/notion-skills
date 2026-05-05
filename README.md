@@ -71,13 +71,12 @@ notion-skills init
 
 `init` is a guided wizard. It asks:
 
-1. **Scope** — global (per-machine, syncs to `~/.claude/skills/` etc.) or project (per-repo, syncs to `<repo>/.claude/skills/`).
-2. **Database** — paste the URL of an existing Notion database, or create a fresh one under a parent page.
-3. **Schema upgrade** — auto-runs if your DB is missing the properties skill spec needs.
-4. **Targets** — which agent CLIs to sync to (Claude Code, Codex, OpenCode, Cursor, Gemini).
-5. **Tag filter** — optional. Pick include/exclude tags so you only get the skills you care about.
-6. **Migrate locals** — if you already have skills in `~/.claude/skills/`, it offers to push them up to Notion.
-7. **First sync** — pulls everything down as symlinks.
+1. **Database** — already have one in Notion? Paste the URL. Don't have one yet? It creates one for you at the workspace root.
+2. **Schema upgrade** — auto-runs if your DB is missing the properties the skill spec needs.
+3. **Targets** — which agent CLIs to sync to (Claude Code, Codex, OpenCode, Cursor, Gemini).
+4. **Tag filter** — optional. Pick include/exclude tags so you only sync the skills you care about.
+5. **Migrate locals** — if you already have skills in `~/.claude/skills/` etc., it offers to push them up to Notion in one shot.
+6. **First sync** — pulls everything down as symlinks into your selected target dirs.
 
 Now you can:
 
@@ -126,19 +125,16 @@ Run any command with `--help` for full options.
 ### `init` — first-time setup
 
 ```bash
-notion-skills init                    # auto-detect scope (project if found, else global)
-notion-skills init --global           # force global scope (~/.notion-skills/scope.json)
-notion-skills init --project          # force project scope (./notion-skills.json)
+notion-skills init
 ```
+
+Walks you through connecting (or creating) a Notion database, picking which agent CLIs to sync to, and uploading any local skills you already have. Idempotent — safe to re-run.
 
 ### `sync` — pull skills from Notion
 
 ```bash
-notion-skills sync                    # sync the active scope
+notion-skills sync                    # pull the latest from Notion
 notion-skills sync docker terraform   # one-off: force-include these skills for this run
-notion-skills sync --global           # sync the global scope explicitly
-notion-skills sync --project          # sync the project scope explicitly
-notion-skills sync --all              # sync both global and project (rare)
 ```
 
 `sync` is incremental — it only re-fetches pages whose `last_edited_time` or properties have changed since the last sync.
@@ -168,16 +164,11 @@ Checks: ntn install + auth, scope existence, schema match, manifest vs central-s
 
 ## Concepts
 
-### Two scopes
+### One scope, per machine
 
-**Global scope** is per-machine. State lives at `~/.notion-skills/` and syncs to your home-dir agent paths (`~/.claude/skills/`, `~/.codex/skills/`, etc.). Configured via `notion-skills init` (default).
+State lives at `~/.notion-skills/` and fans out via symlinks to your home-dir agent paths (`~/.claude/skills/`, `~/.codex/skills/`, etc.). The same skills are available across every repo and every agent CLI you use.
 
-**Project scope** is per-repo. State is split:
-- `<repo>/.notion-skills.json` — committable config (database ID, filter)
-- `<repo>/.notion-skills.lock` — local sync manifest (gitignore me)
-- `<repo>/.claude/skills/<name>/` — generated skills (gitignore me)
-
-Use project scope to share a fixed skill set across a team via the repo. Configured via `notion-skills init --project`.
+> **For repo-specific skills**, just author SKILL.md files directly in `<repo>/.claude/skills/` and commit them. Notion is great for cross-repo skills you author and share with your team; git is the right tool for skills tied to a single codebase.
 
 ### Five supported agents
 
@@ -256,28 +247,18 @@ notion-skills tags
 
 `sync` is incremental — only edited pages are re-fetched.
 
-### Sharing a curated skill set with a team via a repo
+### Sharing a curated skill set with a team
 
-```bash
-cd my-team-repo
-notion-skills init --project
-# pick the team's Notion DB
-# pick targets and tags
-# config gets written to ./.notion-skills.json
-git add .notion-skills.json
-echo ".notion-skills.lock" >> .gitignore
-echo ".claude/skills/" >> .gitignore
-git commit -m "Configure notion-skills"
-```
+Everyone on the team runs `notion-skills init` once and points at the team's Notion database. From then on, `notion-skills sync` keeps everyone aligned. Editing in Notion is the canonical path; new skills authored by anyone propagate to teammates the next time they sync.
 
-Teammates clone the repo and run `notion-skills sync` — they get the same skill set under `<repo>/.claude/skills/`.
+For per-user filtering (e.g., engineers on the iOS team only want iOS-tagged skills), use `notion-skills tags` to set include/exclude lists locally — these stay on each person's machine.
 
 ### Migrating from `~/.claude/skills/` files
 
-If you've been authoring skills as files (or symlinks from a shared repo like agent-config), upload them into Notion in one shot:
+If you've been authoring skills as files (or symlinks from a shared repo like agent-config), `init` already detects them and offers to upload in one shot. To re-run that step later:
 
 ```bash
-notion-skills migrate                              # scan your scope's target dirs
+notion-skills migrate                              # scan your configured target dirs
 notion-skills migrate --from ~/Developer/agents    # plus a custom path
 ```
 
@@ -287,20 +268,16 @@ Locals are moved to `~/.notion-skills/backup/migrate-<ts>/` after Notion confirm
 
 ```
 ~/.notion-skills/
-├── scope.json              # global: db, targets, filter
-├── manifest.json           # global sync state (atomic writes)
-├── skills/<name>/          # global central source-of-truth
+├── scope.json              # database id, sync targets, filter
+├── manifest.json           # sync state (atomic writes)
+├── skills/<name>/          # central source-of-truth
 └── backup/migrate-<ts>/    # local copies displaced during migrate
 
-~/.claude/skills/<name>     → symlink → ~/.notion-skills/skills/<name>
-~/.codex/skills/<name>      → symlink → ~/.notion-skills/skills/<name>
-~/.cursor/skills/<name>     → symlink → ~/.notion-skills/skills/<name>
+~/.claude/skills/<name>          → symlink → ~/.notion-skills/skills/<name>
+~/.codex/skills/<name>           → symlink → ~/.notion-skills/skills/<name>
+~/.cursor/skills/<name>          → symlink → ~/.notion-skills/skills/<name>
 ~/.config/opencode/skills/<name> → symlink → ~/.notion-skills/skills/<name>
-~/.gemini/skills/<name>     → symlink → ~/.notion-skills/skills/<name>
-
-<repo>/.notion-skills.json     # project: committable scope config
-<repo>/.notion-skills.lock     # project sync state (gitignore me)
-<repo>/.claude/skills/<name>/  # project skills (gitignore me)
+~/.gemini/skills/<name>          → symlink → ~/.notion-skills/skills/<name>
 ```
 
 Auth lives in `ntn`'s store (OS keychain by default). `rm -rf ~/.notion-skills` wipes notion-skills state without affecting auth.

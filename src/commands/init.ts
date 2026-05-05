@@ -2,50 +2,37 @@ import chalk from "chalk";
 import { dirname } from "node:path";
 import { checkbox, confirm, input, select } from "@inquirer/prompts";
 import { NotionClient, findMultiSelectProperty } from "../notion.js";
-import {
-  findProjectScopePath,
-  getScope,
-  writeGlobalScope,
-  writeProjectScope,
-} from "../scope.js";
+import { getScope, writeScope } from "../scope.js";
 import { detectTargets } from "../targets.js";
 import { KNOWN_TARGETS } from "../known-targets.js";
-import { PROJECT_SCOPE_FILENAME, type TargetKey } from "../paths.js";
+import { type TargetKey } from "../paths.js";
 import { assertNtnInstalled } from "../ntn.js";
 import { parseNotionId } from "../parse-id.js";
 import { discoverSkills, type Classification, type ParsedSkill } from "../migrate.js";
 import { migrateCommand } from "./migrate.js";
 import { runSync, printSummary } from "../sync.js";
 
-interface InitOptions {
-  global?: boolean;
-  project?: boolean;
-}
-
 /**
  * Wizard flow:
  *
- *   1. Pick scope (global / project)
- *   2. "Already have a Skills database in Notion?"
+ *   1. "Already have a Skills database in Notion?"
  *      yes → paste URL → connect
  *      no  → name → create at workspace root
- *   3. Auto-upgrade schema (no warnings — just make it right)
- *   4. Pick sync targets and tag filter
- *   5. Save scope
- *   6. Run sync (populates manifest; for connect-existing this also pulls
- *      down any pages already in the DB as symlinks)
- *   7. Scan local skills NOT yet in the DB; if any exist, show preview
- *      with sources / conflicts and ask if the user wants to upload them
- *   8. Print a per-intent summary with the DB URL
+ *   2. Auto-upgrade schema (no warnings — just make it right)
+ *   3. Pick sync targets and tag filter
+ *   4. Save scope
+ *   5. Run sync (for connect-existing this pulls down whatever's already
+ *      in the DB as symlinks; for create-new it's a no-op against an empty
+ *      DB, used to populate the manifest)
+ *   6. Scan local skills NOT yet in the DB; if any exist, show preview
+ *      with sources/conflicts and ask if the user wants to upload them
+ *   7. Print summary with the DB URL
  */
-export async function initCommand(opts: InitOptions): Promise<void> {
+export async function initCommand(): Promise<void> {
   await assertNtnInstalled();
   const client = new NotionClient();
 
-  // ---- 1. Scope ---------------------------------------------------------
-  const mode = await chooseMode(opts);
-
-  // ---- 2. Connect or create the database -------------------------------
+  // ---- 1. Connect or create the database -------------------------------
   const useExisting = await select({
     message: "Already have a Skills database in Notion?",
     choices: [
@@ -60,7 +47,7 @@ export async function initCommand(opts: InitOptions): Promise<void> {
       ? { ...(await pickExistingDatabase(client)), isFresh: false }
       : { ...(await createNewDatabase(client)), isFresh: true };
 
-  // ---- 3. Auto-upgrade schema ------------------------------------------
+  // ---- 2. Auto-upgrade schema ------------------------------------------
   process.stdout.write(chalk.dim("Reconciling schema... "));
   const { added, retyped } = await client.upgradeSchema(dataSourceId);
   if (added.length === 0 && retyped.length === 0) {
@@ -69,7 +56,7 @@ export async function initCommand(opts: InitOptions): Promise<void> {
     console.log(chalk.green(`✓ added ${added.length}, retyped ${retyped.length}`));
   }
 
-  // ---- 4. Tags + targets -----------------------------------------------
+  // ---- 3. Tags + targets -----------------------------------------------
   const dataSource = await client.getDataSource(dataSourceId);
   const tagsProp = findMultiSelectProperty(dataSource as any, "Tags");
   const includeTags =
@@ -91,45 +78,22 @@ export async function initCommand(opts: InitOptions): Promise<void> {
         })
       : [];
 
-  // ---- 5. Persist scope ------------------------------------------------
-  if (mode === "global") {
-    const targets = await pickTargets();
-    await writeGlobalScope({
-      database_id: databaseId,
-      data_source_id: dataSourceId,
-      database_title: databaseTitle,
-      targets,
-      filter: { include_tags: includeTags, exclude_tags: excludeTags },
-    });
-    console.log(chalk.green(`✓ Saved global scope (targets: ${targets.join(", ")})`));
-  } else {
-    const cwd = process.cwd();
-    if (findProjectScopePath(cwd)) {
-      const ok = await confirm({
-        message: ".notion-skills.json already exists here. Overwrite?",
-        default: false,
-      });
-      if (!ok) {
-        console.log(chalk.dim("Aborted."));
-        return;
-      }
-    }
-    const path = await writeProjectScope(cwd, {
-      database_id: databaseId,
-      data_source_id: dataSourceId,
-      database_title: databaseTitle,
-      filter: { include_tags: includeTags, exclude_tags: excludeTags },
-    });
-    console.log(chalk.green(`✓ Saved project scope at ${path}`));
-    console.log(
-      chalk.dim(`  commit ${PROJECT_SCOPE_FILENAME} so teammates get the same skills.`),
-    );
-  }
+  // ---- 4. Persist scope ------------------------------------------------
+  const targets = await pickTargets();
+  await writeScope({
+    database_id: databaseId,
+    data_source_id: dataSourceId,
+    database_title: databaseTitle,
+    targets,
+    filter: { include_tags: includeTags, exclude_tags: excludeTags },
+  });
+  console.log(chalk.green(`✓ Saved scope (targets: ${targets.join(", ")})`));
 
-  // ---- 6. Initial sync -------------------------------------------------
-  // For connect-existing this pulls down whatever's in the DB. For create-new
-  // it's a no-op against an empty DB but populates the manifest so subsequent
-  // local-skill detection knows what's "managed" vs "new".
+  // ---- 5. Initial sync -------------------------------------------------
+  // For connect-existing this pulls down whatever's in the DB. For
+  // create-new it's a no-op against an empty DB but populates the
+  // manifest so subsequent local-skill detection knows what's "managed"
+  // vs "new".
   if (!isFresh) {
     const reloaded = await getScope();
     if (reloaded) {
@@ -138,56 +102,29 @@ export async function initCommand(opts: InitOptions): Promise<void> {
     }
   }
 
-  // ---- 7. Detect local skills not yet in Notion ------------------------
-  if (mode === "global") {
-    const targetDirs = KNOWN_TARGETS.map((t) => t.dir);
-    const found = await discoverSkills({ sourceDirs: targetDirs });
-    const newCandidates = found.filter(
-      (c): c is Classification & { kind: "new" } => c.kind === "new",
-    );
+  // ---- 6. Detect local skills not yet in Notion ------------------------
+  const targetDirs = KNOWN_TARGETS.map((t) => t.dir);
+  const found = await discoverSkills({ sourceDirs: targetDirs });
+  const newCandidates = found.filter(
+    (c): c is Classification & { kind: "new" } => c.kind === "new",
+  );
 
-    if (newCandidates.length > 0) {
-      printLocalSkillPreview(newCandidates.map((c) => c.skill));
-      const upload = await confirm({
-        message: `Upload ${newCandidates.length === 1 ? "this skill" : `these ${newCandidates.length} skills`} to Notion now?`,
-        default: true,
-      });
-      if (upload) {
-        await migrateCommand({ yes: true });
-      }
+  if (newCandidates.length > 0) {
+    printLocalSkillPreview(newCandidates.map((c) => c.skill));
+    const upload = await confirm({
+      message: `Upload ${newCandidates.length === 1 ? "this skill" : `these ${newCandidates.length} skills`} to Notion now?`,
+      default: true,
+    });
+    if (upload) {
+      await migrateCommand({ yes: true });
     }
   }
 
-  // ---- 8. Done banner --------------------------------------------------
+  // ---- 7. Done banner --------------------------------------------------
   printDoneBanner({ isFresh, databaseUrl });
 }
 
 // ---------- helpers ----------
-
-async function chooseMode(opts: InitOptions): Promise<"global" | "project"> {
-  if (opts.global && opts.project) {
-    throw new Error("Pass only one of --global / --project.");
-  }
-  if (opts.global) return "global";
-  if (opts.project) return "project";
-
-  const inProject = !!findProjectScopePath(process.cwd());
-  return select({
-    message: "Which scope?",
-    choices: [
-      {
-        name: "Global — use skills everywhere (e.g. ~/.claude/skills)",
-        value: "global" as const,
-      },
-      {
-        name: inProject
-          ? "Project — overwrite this project's .notion-skills.json"
-          : "Project — use skills for this project only",
-        value: "project" as const,
-      },
-    ],
-  });
-}
 
 async function pickExistingDatabase(client: NotionClient): Promise<{
   databaseId: string;

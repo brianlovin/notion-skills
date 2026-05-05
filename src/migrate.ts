@@ -381,25 +381,16 @@ export function sourceIsInScope(source: string, scopeTargetDirs: string[]): bool
 // ---------- source resolution ----------
 
 /**
- * Resolve which dirs to scan based on scope + --from flags.
- * For a global scope we pull in target dirs (~/.claude/skills, etc).
- * For a project scope we use <repo>/.claude/skills.
- * Extras from --from are always appended.
+ * Resolve which dirs to scan: the scope's configured target dirs plus any
+ * extras from `--from` flags. Returned list is deduped.
  */
-export function resolveSourceDirs(
-  scopeKind: "global" | "project",
-  options: { extras?: string[]; targetDirs?: string[]; projectSkillsDir?: string },
-): string[] {
-  const dirs: string[] = [];
-  if (scopeKind === "global" && options.targetDirs) {
-    dirs.push(...options.targetDirs);
-  }
-  if (scopeKind === "project" && options.projectSkillsDir) {
-    dirs.push(options.projectSkillsDir);
-  }
+export function resolveSourceDirs(options: {
+  extras?: string[];
+  targetDirs: string[];
+}): string[] {
+  const dirs = [...options.targetDirs];
   for (const extra of options.extras ?? []) {
     dirs.push(resolve(extra));
   }
-  // Dedup paths.
   return [...new Set(dirs)];
 }

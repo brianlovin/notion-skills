@@ -1,17 +1,12 @@
 import chalk from "chalk";
 import { existsSync, lstatSync, readlinkSync, readdirSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { confirm } from "@inquirer/prompts";
 import { getScope, type Scope } from "../scope.js";
 import { ntnDoctor, ntnVersion } from "../ntn.js";
 import { readManifest } from "../manifest.js";
-import {
-  MANIFEST_FILE,
-  PROJECT_LOCK_FILENAME,
-  PROJECT_SKILLS_RELATIVE,
-  SKILLS_STORE,
-} from "../paths.js";
+import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
 import { findTargetByKey, KNOWN_TARGETS } from "../known-targets.js";
 import { NotionClient } from "../notion.js";
 import { SCHEMA } from "../schema.js";
@@ -47,7 +42,7 @@ export async function doctorCommand(opts: DoctorOptions): Promise<void> {
   }
   checks.push({
     status: "ok",
-    label: `Scope: ${scope.type} (${scope.database_title ?? scope.database_id})`,
+    label: `Scope: ${scope.database_title ?? scope.database_id}`,
   });
 
   // 3. Schema (only if ntn is authenticated)
@@ -59,10 +54,8 @@ export async function doctorCommand(opts: DoctorOptions): Promise<void> {
   // 4. Manifest / disk consistency
   checks.push(...(await checkManifestVsDisk(scope)));
 
-  // 5. Symlinks (global scope only)
-  if (scope.type === "global") {
-    checks.push(...(await checkSymlinks(scope)));
-  }
+  // 5. Symlinks
+  checks.push(...(await checkSymlinks(scope)));
 
   // Run fixes if asked.
   if (opts.fix) {
@@ -151,15 +144,9 @@ async function checkSchema(scope: Scope): Promise<CheckResult[]> {
   }
 }
 
-async function checkManifestVsDisk(scope: Scope): Promise<CheckResult[]> {
-  const manifestPath =
-    scope.type === "global"
-      ? MANIFEST_FILE
-      : resolve(scope.root, PROJECT_LOCK_FILENAME);
-  const contentRoot =
-    scope.type === "global"
-      ? SKILLS_STORE
-      : resolve(scope.root, PROJECT_SKILLS_RELATIVE);
+async function checkManifestVsDisk(_scope: Scope): Promise<CheckResult[]> {
+  const manifestPath = MANIFEST_FILE;
+  const contentRoot = SKILLS_STORE;
 
   const manifest = await readManifest(manifestPath);
   if (!manifest) {
@@ -216,7 +203,6 @@ async function checkManifestVsDisk(scope: Scope): Promise<CheckResult[]> {
 }
 
 async function checkSymlinks(scope: Scope): Promise<CheckResult[]> {
-  if (scope.type !== "global") return [];
   const manifest = await readManifest(MANIFEST_FILE);
   if (!manifest) return [];
 

@@ -43,17 +43,12 @@ program
 program
   .command("init")
   .description("Configure a Skills database for sync")
-  .option("--global", "force global scope")
-  .option("--project", "force project scope (writes .notion-skills.json here)")
   .action(initCommand);
 
 program
   .command("sync")
   .description("Sync skills from Notion to local agent directories")
   .argument("[names...]", "specific skill names to include this run")
-  .option("--global", "sync the global scope")
-  .option("--project", "sync the project scope")
-  .option("--all", "sync both global and project scopes")
   .action(syncCommand);
 
 program

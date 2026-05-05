@@ -1,7 +1,7 @@
 import chalk from "chalk";
 import { existsSync, lstatSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import {
   NotionClient,
   type NotionPage,
@@ -32,18 +32,12 @@ import {
   targetSkillPath,
   targetsForKeys,
 } from "./targets.js";
-import {
-  MANIFEST_FILE,
-  PROJECT_LOCK_FILENAME,
-  PROJECT_SKILLS_RELATIVE,
-  SKILLS_STORE,
-} from "./paths.js";
+import { MANIFEST_FILE, SKILLS_STORE } from "./paths.js";
 import type { Scope } from "./scope.js";
 
 const TAGS_PROPERTY = "Tags";
 
 export interface SyncSummary {
-  scope: Scope["type"];
   created: string[];
   updated: string[];
   removed: string[];
@@ -60,7 +54,6 @@ export async function runSync(
   const client = new NotionClient();
 
   const summary: SyncSummary = {
-    scope: scope.type,
     created: [],
     updated: [],
     removed: [],
@@ -104,10 +97,9 @@ export async function runSync(
     (s) => decide({ name: s.name, tags: s.tags }, scope.filter, ephemeralNames).keep,
   );
 
-  const dirs = layoutFor(scope);
-
   // Load/init manifest.
-  const manifestPath = dirs.manifestPath;
+  const manifestPath = MANIFEST_FILE;
+  const contentRoot = SKILLS_STORE;
   const oldManifest =
     (await readManifest(manifestPath)) ??
     emptyManifest(scope.database_id, scope.data_source_id);
@@ -167,7 +159,7 @@ export async function runSync(
       body: skill.body,
     });
     const skillName = skill.properties.name;
-    const skillDir = join(dirs.contentRoot, skillName);
+    const skillDir = join(contentRoot, skillName);
     await mkdir(skillDir, { recursive: true });
     await writeFile(join(skillDir, "SKILL.md"), md, "utf8");
 
@@ -188,35 +180,31 @@ export async function runSync(
 
   // Remove obsolete skills from disk.
   for (const name of diff.toRemove) {
-    const skillDir = join(dirs.contentRoot, name);
+    const skillDir = join(contentRoot, name);
     if (existsSync(skillDir)) {
       await rm(skillDir, { recursive: true, force: true });
     }
     summary.removed.push(name);
   }
 
-  // Reconcile targets.
-  if (scope.type === "global") {
-    const targets = targetsForKeys(scope.targets);
-    for (const t of targets) {
-      // Ensure links for current keep set.
-      for (const name of Object.keys(nextManifest.skills)) {
-        const real = join(dirs.contentRoot, name);
-        const link = targetSkillPath(t, name);
-        const result = await ensureSymlink(real, link);
-        if (result === "skipped") {
-          summary.conflicts.push({ name, target: link });
-        }
-      }
-      // Remove links for dropped skills.
-      for (const name of diff.toRemove) {
-        const link = targetSkillPath(t, name);
-        await removeSymlink(link);
+  // Reconcile target dirs: each agent CLI gets a symlink to the central
+  // store for every kept skill, and the symlink for any removed skill is
+  // cleaned up.
+  const targets = targetsForKeys(scope.targets);
+  for (const t of targets) {
+    for (const name of Object.keys(nextManifest.skills)) {
+      const real = join(contentRoot, name);
+      const link = targetSkillPath(t, name);
+      const result = await ensureSymlink(real, link);
+      if (result === "skipped") {
+        summary.conflicts.push({ name, target: link });
       }
     }
+    for (const name of diff.toRemove) {
+      const link = targetSkillPath(t, name);
+      await removeSymlink(link);
+    }
   }
-  // For project scope, we wrote directly into <repo>/.claude/skills — no
-  // symlink reconciliation needed. Removed dirs were rm'd above.
 
   await writeManifest(manifestPath, nextManifest);
   return summary;
@@ -275,21 +263,6 @@ function readSpecPropertyBag(page: NotionPage): Record<string, unknown> {
   out.shell = readSelect(page.properties, "Shell");
   out.tags = [...readMultiSelect(page.properties, TAGS_PROPERTY)].sort();
   return out;
-}
-
-interface ScopeLayout {
-  contentRoot: string;
-  manifestPath: string;
-}
-
-function layoutFor(scope: Scope): ScopeLayout {
-  if (scope.type === "global") {
-    return { contentRoot: SKILLS_STORE, manifestPath: MANIFEST_FILE };
-  }
-  return {
-    contentRoot: resolve(scope.root, PROJECT_SKILLS_RELATIVE),
-    manifestPath: resolve(scope.root, PROJECT_LOCK_FILENAME),
-  };
 }
 
 export function printSummary(summary: SyncSummary): void {

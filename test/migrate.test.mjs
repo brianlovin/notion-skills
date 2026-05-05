@@ -381,24 +381,16 @@ test("markConflicts: leaves 'invalid' alone", () => {
 
 // ---------- resolveSourceDirs ----------
 
-test("resolveSourceDirs: global pulls in target dirs and extras", () => {
-  const dirs = resolveSourceDirs("global", {
+test("resolveSourceDirs: target dirs + extras combined", () => {
+  const dirs = resolveSourceDirs({
     targetDirs: ["/a", "/b"],
     extras: ["/c"],
   });
   assert.deepEqual(dirs.sort(), ["/a", "/b", "/c"]);
 });
 
-test("resolveSourceDirs: project uses projectSkillsDir, ignores targetDirs", () => {
-  const dirs = resolveSourceDirs("project", {
-    targetDirs: ["/should-not-appear"],
-    projectSkillsDir: "/myrepo/.claude/skills",
-  });
-  assert.deepEqual(dirs, ["/myrepo/.claude/skills"]);
-});
-
 test("resolveSourceDirs: dedups duplicate paths", () => {
-  const dirs = resolveSourceDirs("global", {
+  const dirs = resolveSourceDirs({
     targetDirs: ["/a", "/b"],
     extras: ["/a"],
   });

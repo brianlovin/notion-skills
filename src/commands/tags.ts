@@ -2,11 +2,7 @@ import chalk from "chalk";
 import { checkbox } from "@inquirer/prompts";
 import { NotionClient, findMultiSelectProperty } from "../notion.js";
 import { assertNtnInstalled } from "../ntn.js";
-import {
-  getScope,
-  writeGlobalScope,
-  writeProjectScope,
-} from "../scope.js";
+import { getScope, writeScope } from "../scope.js";
 
 export async function tagsCommand(): Promise<void> {
   const scope = await getScope();
@@ -55,22 +51,13 @@ export async function tagsCommand(): Promise<void> {
     exclude_tags: newExclude,
   };
 
-  if (scope.type === "global") {
-    await writeGlobalScope({
-      database_id: scope.database_id,
-      data_source_id: scope.data_source_id,
-      database_title: scope.database_title,
-      targets: scope.targets,
-      filter: updatedFilter,
-    });
-  } else {
-    await writeProjectScope(scope.root, {
-      database_id: scope.database_id,
-      data_source_id: scope.data_source_id,
-      database_title: scope.database_title,
-      filter: updatedFilter,
-    });
-  }
+  await writeScope({
+    database_id: scope.database_id,
+    data_source_id: scope.data_source_id,
+    database_title: scope.database_title,
+    targets: scope.targets,
+    filter: updatedFilter,
+  });
 
   console.log(chalk.green(`\n✓ Tag filters updated.`));
   console.log(`Run ${chalk.bold("notion-skills sync")} to apply.`);
