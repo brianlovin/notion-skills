@@ -17,6 +17,7 @@ import {
   readManifest,
   writeManifest,
 } from "../manifest.js";
+import { HASH_V, hashBehaviorProperties, hashBody } from "../page-hash.js";
 import {
   ensureSymlink,
   targetSkillPath,
@@ -158,6 +159,7 @@ export async function installCommand(
   const nextManifest: Manifest = {
     ...manifest,
     last_synced_at: new Date().toISOString(),
+    hash_v: HASH_V,
     skills: { ...manifest.skills },
   };
 
@@ -179,16 +181,11 @@ export async function installCommand(
       await mkdir(dir, { recursive: true });
       await writeFile(join(dir, "SKILL.md"), md, "utf8");
 
-      // Compute props_hash from the same property bag we'd see in sync.
-      // We don't have summarisePage here; recompute inline.
-      const propsHash = hashContent(
-        JSON.stringify(skill.properties),
-      );
-
       nextManifest.skills[skill.properties.name] = {
         page_id: skill.pageId,
         last_edited_time: skill.lastEditedTime,
-        props_hash: propsHash,
+        props_hash: hashBehaviorProperties(page),
+        body_hash: hashBody(skill.body),
         local_hash: hashContent(md),
       };
 
@@ -199,30 +196,14 @@ export async function installCommand(
         await ensureSymlink(dir, link);
       }
 
-      // Bump the Installs counter so users can spot popular skills in
-      // `list`. Fail-soft — the install succeeded; we just couldn't
-      // record the metric. Don't surface the failure to the user.
-      //
-      // The PATCH bumps the page's last_edited_time as a side effect.
-      // If we left the manifest's last_edited_time pointing at the
-      // pre-increment value, the next sync would think the page had
-      // changed and pull it again unnecessarily. Refetch so the
-      // manifest matches reality after the metadata-only edit.
-      const incremented = await client.incrementPageNumber(
-        skill.pageId,
-        "Installs",
-      );
-      if (incremented !== null) {
-        try {
-          const fresh = await client.getPage(skill.pageId);
-          nextManifest.skills[skill.properties.name] = {
-            ...nextManifest.skills[skill.properties.name]!,
-            last_edited_time: fresh.last_edited_time,
-          };
-        } catch {
-          // Refresh failure is non-fatal: the next sync reconciles.
-        }
-      }
+      // Bump the Installs counter so popular skills surface in `list`.
+      // Fail-soft and fire-and-forget for drift purposes: the PATCH
+      // bumps the page's last_edited_time, but we don't refetch — drift
+      // detection now compares props_hash + body_hash, both of which are
+      // unaffected by an Installs edit (Installs is metricOnly). The
+      // stale last_edited_time on this entry just means the next `list`
+      // takes the slow path once before re-caching.
+      await client.incrementPageNumber(skill.pageId, "Installs");
 
       task.done();
     } catch (err) {

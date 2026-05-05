@@ -14,6 +14,7 @@ import {
   readManifest,
   writeManifest,
 } from "../manifest.js";
+import { HASH_V, hashBehaviorProperties, hashBody } from "../page-hash.js";
 import { NotionClient } from "../notion.js";
 import { assertNtnInstalled, ntnSetPageMarkdown } from "../ntn.js";
 import { parseSkillFile } from "../migrate.js";
@@ -213,6 +214,7 @@ async function pushUpdates(
   const nextManifest: Manifest = {
     ...manifest,
     last_synced_at: new Date().toISOString(),
+    hash_v: HASH_V,
     skills: { ...manifest.skills },
   };
   for (const p of pushed) {
@@ -230,7 +232,8 @@ async function pushUpdates(
       nextManifest.skills[p.name] = {
         page_id: p.pageId,
         last_edited_time: converted.skill.lastEditedTime,
-        props_hash: hashContent(JSON.stringify(converted.skill.properties)),
+        props_hash: hashBehaviorProperties(fresh),
+        body_hash: hashBody(converted.skill.body),
         local_hash: hashContent(md),
       };
     } catch {

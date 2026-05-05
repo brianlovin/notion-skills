@@ -4,14 +4,29 @@ import { createHash } from "node:crypto";
 
 export interface ManifestEntry {
   page_id: string;
-  /** Edited timestamp from the Notion API; covers content-block changes. */
+  /**
+   * Best-effort cache of the page's `last_edited_time` AS OF the last
+   * write to this entry. Used as a fast-path optimization: when the live
+   * value matches, the page is unambiguously unchanged and we can skip
+   * fetching blocks. When it differs, fall through to body_hash /
+   * props_hash comparison — the source of truth for drift detection.
+   * Notion bumps last_edited_time on every PATCH (including metric-only
+   * edits like Installs), so it's a hint, not authoritative.
+   */
   last_edited_time: string;
   /**
-   * Hash of all spec properties (description + when_to_use + model + ...).
-   * Notion does NOT bump last_edited_time for property-only edits, so we
-   * compare this hash on every sync to detect those.
+   * Hash of behavior-affecting properties (description, when_to_use,
+   * model, agent, allowed_tools, etc). Excludes Tags (taxonomyOnly) and
+   * Installs (metricOnly) — neither affects how a model executes the
+   * skill, so editing them isn't drift. See src/page-hash.ts.
    */
   props_hash: string;
+  /**
+   * Hash of the rendered markdown body. Combined with props_hash, this is
+   * the authoritative drift signal. Optional for backward-compat with
+   * pre-hash_v=2 manifests; the next list/sync silently rebaselines.
+   */
+  body_hash?: string;
   /**
    * sha256 hash (truncated to 16 chars) of the SKILL.md file as written
    * to disk by the last sync. Drift on this hash is how `sync` detects
@@ -27,6 +42,14 @@ export interface Manifest {
   database_id: string;
   data_source_id: string;
   last_synced_at: string;
+  /**
+   * Drift-hash scheme version. When the manifest's hash_v is older than
+   * src/page-hash.ts:HASH_V, drift checks treat existing entries as
+   * "needs rebaseline" — they recompute hashes from current page state
+   * without flagging drift. Optional for forward-compat with manifests
+   * written before this field existed (treated as 1).
+   */
+  hash_v?: number;
   skills: Record<string, ManifestEntry>;
 }
 
@@ -36,6 +59,7 @@ export function emptyManifest(databaseId: string, dataSourceId: string): Manifes
     database_id: databaseId,
     data_source_id: dataSourceId,
     last_synced_at: new Date(0).toISOString(),
+    hash_v: 2,
     skills: {},
   };
 }

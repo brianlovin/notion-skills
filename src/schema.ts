@@ -63,6 +63,13 @@ export interface PropertyDef {
    * derivation all skip these.
    */
   metricOnly?: boolean;
+  /**
+   * When true the property is round-tripped (it lives in SKILL.md) but
+   * doesn't affect how a model executes the skill — it's discovery/
+   * curation sugar (Tags). Excluded from the content drift hash so
+   * editing tags in Notion never marks a skill as "outdated."
+   */
+  taxonomyOnly?: boolean;
 }
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -205,6 +212,7 @@ export const SCHEMA: PropertyDef[] = [
     kind: "multi_select",
     options: [],
     selfHealing: true,
+    taxonomyOnly: true,
     description: "Discovery tags. Self-healing — new tags auto-added on publish.",
   },
   {

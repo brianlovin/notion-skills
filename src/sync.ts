@@ -6,9 +6,7 @@ import { confirm } from "@inquirer/prompts";
 import {
   NotionClient,
   type NotionPage,
-  readMultiSelect,
   readRichText,
-  readSelect,
   readTitle,
 } from "./notion.js";
 import { assertNtnInstalled } from "./ntn.js";
@@ -26,6 +24,11 @@ import {
   readManifest,
   writeManifest,
 } from "./manifest.js";
+import {
+  HASH_V,
+  hashBehaviorProperties,
+  hashBody,
+} from "./page-hash.js";
 import {
   ensureSymlink,
   removeSymlink,
@@ -268,6 +271,7 @@ export async function runSync(
     database_id: scope.database_id,
     data_source_id: scope.data_source_id,
     last_synced_at: new Date().toISOString(),
+    hash_v: HASH_V,
     skills: { ...oldManifest.skills },
   };
 
@@ -327,6 +331,7 @@ export async function runSync(
       page_id: skill.pageId,
       last_edited_time: skill.lastEditedTime,
       props_hash: matchingSummary?.propsHash ?? "",
+      body_hash: hashBody(skill.body),
       local_hash: hashContent(md),
     };
 
@@ -425,23 +430,16 @@ function summarisePage(page: NotionPage): PageSummary | null {
   if (!title) return null;
   const description = readRichText(page.properties, "Description");
 
-  const propBag = readSpecPropertyBag(page);
-  const propsHash = hashContent(JSON.stringify(propBag));
-
   return {
     id: page.id,
     title,
     name: slugify(title),
     description,
     lastEditedTime: page.last_edited_time,
-    propsHash,
+    propsHash: hashBehaviorProperties(page),
   };
 }
 
-/**
- * Read every property the schema cares about into a deterministic, sorted
- * record for hashing. Order-stable so the same page always hashes the same.
- */
 function conflictBackupTimestamp(): string {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -454,25 +452,6 @@ function conflictBackupTimestamp(): string {
     pad(d.getUTCMinutes()) +
     pad(d.getUTCSeconds())
   );
-}
-
-function readSpecPropertyBag(page: NotionPage): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  out.description = readRichText(page.properties, "Description");
-  out.when_to_use = readRichText(page.properties, "When To Use");
-  out.argument_hint = readRichText(page.properties, "Argument Hint");
-  out.arguments = readRichText(page.properties, "Arguments");
-  out.allowed_tools = readRichText(page.properties, "Allowed Tools");
-  out.paths = readRichText(page.properties, "Paths");
-  out.disable_model_invocation = readSelect(page.properties, "Disable Model Invocation");
-  out.user_invocable = readSelect(page.properties, "User Invocable");
-  out.model = readSelect(page.properties, "Model");
-  out.effort = readSelect(page.properties, "Effort");
-  out.context = readSelect(page.properties, "Context");
-  out.agent = readSelect(page.properties, "Agent");
-  out.shell = readSelect(page.properties, "Shell");
-  out.tags = readMultiSelect(page.properties, "Tags").slice().sort();
-  return out;
 }
 
 export function printSummary(summary: SyncSummary): void {

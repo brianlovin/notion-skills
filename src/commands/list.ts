@@ -3,6 +3,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   NotionClient,
+  type NotionPage,
   readMultiSelect,
   readNumber,
   readRichText,
@@ -10,10 +11,20 @@ import {
 } from "../notion.js";
 import { assertNtnInstalled } from "../ntn.js";
 import { shouldSyncSkill } from "../filter.js";
-import { slugify } from "../convert.js";
+import { blocksToMarkdown, fetchBlockTree, slugify } from "../convert.js";
 import { getScope } from "../scope.js";
 import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
-import { readManifest } from "../manifest.js";
+import {
+  type Manifest,
+  type ManifestEntry,
+  readManifest,
+  writeManifest,
+} from "../manifest.js";
+import {
+  HASH_V,
+  hashBehaviorProperties,
+  hashBody,
+} from "../page-hash.js";
 import { readFile } from "node:fs/promises";
 
 interface ListOptions {
@@ -51,6 +62,8 @@ interface Row {
   installs: number;
   state: SkillState;
   reason?: string;
+  /** Carried internally so pass 2 can run drift checks without re-querying. */
+  _page?: NotionPage;
 }
 
 export async function listCommand(options: ListOptions = {}): Promise<void> {
@@ -103,19 +116,64 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
       continue;
     }
 
-    // Installed. Check for outdated by comparing manifest's last_edited_time
-    // and props_hash against the page. (Cheap remote-change check.)
-    const entry = manifest?.skills[name];
-    const remoteEdited = page.last_edited_time;
-    const isOutdated = entry !== undefined && remoteEdited !== entry.last_edited_time;
+    // Installed — defer the (potentially network-bound) drift check
+    // to a second pass so we can issue concurrent block fetches.
     rows.push({
       name,
       title,
       description,
       tags,
       installs,
-      state: isOutdated ? "outdated" : "installed",
+      state: "installed",
+      _page: page,
     });
+  }
+
+  // Pass 1.5: drift-check installed skills. Fast path is the common
+  // case (matches when nothing changed in Notion); the slow path
+  // fetches blocks per skill that failed fast path so body edits
+  // surface as outdated. Side effect: caches refreshed
+  // last_edited_time + body_hash on the manifest so subsequent lists
+  // short-circuit on the fast path. This is a benign read-cache
+  // update from a read-mostly command.
+  const manifestPatches: Array<[string, Partial<ManifestEntry>]> = [];
+  for (const row of rows) {
+    if (row.state !== "installed" || !row._page || !manifest) continue;
+    const entry = manifest.skills[row.name];
+    if (!entry) continue;
+    const result = await checkDrift(client, row._page, entry, manifest);
+    if (result.outdated) {
+      row.state = "outdated";
+    } else if (
+      result.refreshedLastEditedTime ||
+      result.refreshedBodyHash !== undefined
+    ) {
+      const patch: Partial<ManifestEntry> = {};
+      if (result.refreshedLastEditedTime) {
+        patch.last_edited_time = result.refreshedLastEditedTime;
+      }
+      if (result.refreshedBodyHash !== undefined) {
+        patch.body_hash = result.refreshedBodyHash;
+      }
+      manifestPatches.push([row.name, patch]);
+    }
+    delete row._page;
+  }
+  if (manifest && manifestPatches.length > 0) {
+    const next: Manifest = {
+      ...manifest,
+      hash_v: HASH_V,
+      skills: { ...manifest.skills },
+    };
+    for (const [name, patch] of manifestPatches) {
+      const existing = next.skills[name];
+      if (existing) next.skills[name] = { ...existing, ...patch };
+    }
+    try {
+      await writeManifest(MANIFEST_FILE, next);
+    } catch {
+      // Cache update failure is non-fatal — list still renders correctly.
+    }
   }
 
   // Pass 2: drafts — central-store entries not in the manifest and not in
@@ -297,6 +355,63 @@ function stateMarker(state: SkillState): string {
     case "excluded": return chalk.red("✗");
     case "invalid": return chalk.yellow("!");
   }
+}
+
+interface DriftResult {
+  outdated: boolean;
+  /** Updated cache values to record on the manifest entry when no drift. */
+  refreshedLastEditedTime?: string;
+  refreshedBodyHash?: string;
+}
+
+/**
+ * Two-phase drift detection.
+ *
+ *   1. Fast path: if `last_edited_time` matches what we last cached, the
+ *      page hasn't been touched since — definitely not outdated.
+ *   2. Slow path: behavior props differ → outdated. Else fetch blocks
+ *      and compare body hashes; differ → outdated. Match → refresh the
+ *      cache so the next list takes the fast path.
+ *
+ * Manifests written before HASH_V=2 carry `props_hash` values that aren't
+ * comparable to the current scheme (they included Tags / used different
+ * keys). We treat those as "not outdated" until the next sync rebases.
+ */
+async function checkDrift(
+  client: NotionClient,
+  page: NotionPage,
+  entry: ManifestEntry,
+  manifest: Manifest,
+): Promise<DriftResult> {
+  if ((manifest.hash_v ?? 1) < HASH_V) {
+    return { outdated: false };
+  }
+  if (page.last_edited_time === entry.last_edited_time) {
+    return { outdated: false };
+  }
+  const currentPropsHash = hashBehaviorProperties(page);
+  if (currentPropsHash !== entry.props_hash) {
+    return { outdated: true };
+  }
+  // Props match but last_edited_time differs — could be a metadata-only
+  // edit (Installs, Tags), or a body edit. Need blocks to know.
+  let body: string;
+  try {
+    const blocks = await fetchBlockTree(client, page.id);
+    body = blocksToMarkdown(blocks);
+  } catch {
+    // Block fetch failed — be conservative: don't flag drift, don't cache.
+    return { outdated: false };
+  }
+  const currentBodyHash = hashBody(body);
+  if (entry.body_hash !== undefined && currentBodyHash !== entry.body_hash) {
+    return { outdated: true };
+  }
+  return {
+    outdated: false,
+    refreshedLastEditedTime: page.last_edited_time,
+    refreshedBodyHash: currentBodyHash,
+  };
 }
 
 function oneLine(s: string): string {

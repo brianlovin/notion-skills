@@ -213,7 +213,7 @@ interface NodeWithChildren extends NotionBlock {
   children?: NodeWithChildren[];
 }
 
-async function fetchBlockTree(
+export async function fetchBlockTree(
   client: NotionClient,
   blockId: string,
   depth = 0,
