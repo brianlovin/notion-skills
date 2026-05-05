@@ -15,6 +15,8 @@ import { doctorCommand } from "./commands/doctor.js";
 import { genCommand } from "./commands/gen.js";
 import { publishCommand } from "./commands/publish.js";
 import { importCommand } from "./commands/import.js";
+import { installCommand } from "./commands/install.js";
+import { uninstallCommand } from "./commands/uninstall.js";
 
 // Read version from package.json so `--version` stays in sync with bumps
 // without us remembering to edit two places.
@@ -85,6 +87,20 @@ program
   .argument("<input>", "URL, file path, or natural-language description")
   .option("--agent <key>", "override the configured coding agent (claude, codex, opencode, gemini)")
   .action(genCommand);
+
+program
+  .command("install")
+  .description("Pull a skill from the workspace store onto this machine")
+  .argument("[slugs...]", "skill slugs to install")
+  .option("--all", "install every skill in the store that isn't already installed")
+  .option("--tag <tag...>", "install all skills matching these tags (all-must-match)")
+  .action(installCommand);
+
+program
+  .command("uninstall")
+  .description("Remove a skill from this machine (Notion page is untouched)")
+  .argument("<slug>", "skill slug to remove")
+  .action(uninstallCommand);
 
 program
   .command("publish")
