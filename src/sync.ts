@@ -7,6 +7,7 @@ import {
   NotionClient,
   type NotionPage,
   type SkillProperties,
+  readMultiSelect,
   readRichText,
   readSelect,
   readTitle,
@@ -580,6 +581,7 @@ function readSpecPropertyBag(page: NotionPage): Record<string, unknown> {
   out.context = readSelect(page.properties, "Context");
   out.agent = readSelect(page.properties, "Agent");
   out.shell = readSelect(page.properties, "Shell");
+  out.tags = readMultiSelect(page.properties, "Tags").slice().sort();
   return out;
 }
 

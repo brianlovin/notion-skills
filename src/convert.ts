@@ -2,6 +2,7 @@ import { stringify as yamlStringify } from "yaml";
 import type { NotionBlock, NotionPage, NotionRichText } from "./notion.js";
 import {
   NotionClient,
+  readMultiSelect,
   readRichText,
   readSelect,
   readTitle,
@@ -65,6 +66,10 @@ export function buildSkillMarkdown(opts: {
 
     if (prop.kind === "rich_text" || prop.kind === "list_text") {
       if (value === "" || (Array.isArray(value) && value.length === 0)) continue;
+    }
+
+    if (prop.kind === "multi_select") {
+      if (!Array.isArray(value) || value.length === 0) continue;
     }
 
     fm[key] = value;
@@ -155,6 +160,11 @@ function readSkillPropertiesFromPage(
     return v;
   };
 
+  const multiSelect = (notionName: string): string[] | undefined => {
+    const v = readMultiSelect(page.properties, notionName);
+    return v.length > 0 ? v : undefined;
+  };
+
   props.when_to_use = richText("When To Use");
   props["argument-hint"] = richText("Argument Hint");
   props.arguments = listFromText("Arguments", /\s+/);
@@ -167,6 +177,7 @@ function readSkillPropertiesFromPage(
   props.context = select("Context");
   props.agent = select("Agent");
   props.shell = select("Shell");
+  props.tags = multiSelect("Tags");
 
   return props;
 }

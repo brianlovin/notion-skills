@@ -2,14 +2,17 @@
  * Single source of truth for the Notion → SKILL.md frontmatter mapping.
  *
  * Each entry describes how a Notion property column corresponds to a key in
- * the Claude Code skill spec (https://code.claude.com/docs/en/skills).
+ * the Claude Code skill spec (https://code.claude.com/docs/en/skills) or the
+ * notion-skills app-store discovery layer (Tags).
  *
  * `kind` controls the type-specific read/write logic:
- *   - "title"      → page title; the only required, name-bearing property
- *   - "rich_text"  → plain string; empty cell omits the frontmatter key
- *   - "checkbox"   → boolean
- *   - "select"     → string from a fixed option set; "default" / empty omit
- *   - "list_text"  → list serialised as space- or comma-separated rich_text
+ *   - "title"        → page title; the only required, name-bearing property
+ *   - "rich_text"    → plain string; empty cell omits the frontmatter key
+ *   - "checkbox"     → boolean
+ *   - "select"       → string from a fixed option set; "default" / empty omit
+ *   - "multi_select" → list of strings from an open option set; new options
+ *                      auto-added on publish
+ *   - "list_text"    → list serialised as space- or comma-separated rich_text
  *
  * Selects that have a spec default expose a "default" option; the empty cell
  * also maps to "default" for users who haven't picked anything.
@@ -22,6 +25,7 @@ export type PropertyKind =
   | "rich_text"
   | "checkbox"
   | "select"
+  | "multi_select"
   | "list_text";
 
 export interface SelectOption {
@@ -178,6 +182,20 @@ export const SCHEMA: PropertyDef[] = [
       { name: "powershell", color: "blue" },
     ],
     description: "Shell for inline command injection (default: bash)",
+  },
+  {
+    // Discovery / curation primitive for the app-store layer. Workspace
+    // admins use tags like `featured`, `engineering`, `productivity` to
+    // group skills; users filter on them via `notion-skills list --tag`
+    // and `notion-skills install --tag`. Options auto-grow on publish
+    // (selfHealing) so any new tag a user types becomes a real Notion
+    // multi-select option without an upgrade step.
+    notionName: "Tags",
+    frontmatterKey: "tags",
+    kind: "multi_select",
+    options: [],
+    selfHealing: true,
+    description: "Discovery tags. Self-healing — new tags auto-added on publish.",
   },
 ];
 

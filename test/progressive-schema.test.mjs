@@ -145,6 +145,36 @@ test("schema: Agent has no pre-populated subagent names", () => {
   assert.equal(def.options[0].name, "default");
 });
 
+test("schema: Tags is a multi_select with no pre-populated options (selfHealing)", () => {
+  // Tags drive discovery for the app-store layer. Options grow on
+  // publish — we don't ship a default tag list because tags are
+  // workspace-specific (engineering vs marketing vs personal etc).
+  const def = SCHEMA.find((p) => p.notionName === "Tags");
+  assert.ok(def, "Tags must be in SCHEMA");
+  assert.equal(def.kind, "multi_select");
+  assert.equal(def.frontmatterKey, "tags");
+  assert.equal(def.selfHealing, true);
+  assert.deepEqual(def.options, []);
+});
+
+test("notionPropsForSkill: tags trigger the Tags column", () => {
+  const result = notionPropsForSkill({
+    name: "foo",
+    description: "ok",
+    tags: ["engineering", "productivity"],
+  });
+  assert.deepEqual([...result], ["Tags"]);
+});
+
+test("notionPropsForSkill: empty tag array doesn't trigger Tags column", () => {
+  const result = notionPropsForSkill({
+    name: "foo",
+    description: "ok",
+    tags: [],
+  });
+  assert.deepEqual([...result], []);
+});
+
 // buildViewConfiguration shapes the Notion default-view PATCH payload.
 // Only properties that exist on the data source are emitted (skipping any
 // progressive columns we haven't added yet); all extant ones appear in

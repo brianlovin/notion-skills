@@ -124,6 +124,26 @@ test("buildSkillMarkdown: emits model + effort + context + agent", () => {
   assert.match(md, /^agent: Explore/m);
 });
 
+test("buildSkillMarkdown: emits tags as a YAML list", () => {
+  const md = buildSkillMarkdown({
+    properties: {
+      name: "x",
+      description: "ok",
+      tags: ["engineering", "productivity"],
+    },
+    body: "body",
+  });
+  assert.match(md, /tags:\n  - engineering\n  - productivity/);
+});
+
+test("buildSkillMarkdown: empty tags don't get emitted", () => {
+  const md = buildSkillMarkdown({
+    properties: { name: "x", description: "ok", tags: [] },
+    body: "body",
+  });
+  assert.doesNotMatch(md, /^tags:/m);
+});
+
 test("buildSkillMarkdown: empty arrays don't get emitted", () => {
   const md = buildSkillMarkdown({
     properties: {

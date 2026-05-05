@@ -275,6 +275,7 @@ export async function parseSkillFile(
     context: optionalString(parsedFm.context),
     agent: optionalString(parsedFm.agent),
     shell: optionalString(parsedFm.shell),
+    tags: optionalList(parsedFm.tags, /\s*,\s*/),
   };
 
   return {

@@ -26,6 +26,8 @@ export interface SkillProperties {
   context?: string;
   agent?: string;
   shell?: string;
+  /** Discovery tags (Notion multi_select). Empty / undefined means untagged. */
+  tags?: string[];
 }
 
 export interface NotionPage {
@@ -93,7 +95,16 @@ export class NotionClient {
 
   async getDataSource(dataSourceId: string): Promise<{
     id: string;
-    properties: Record<string, { id: string; name: string; type: string; multi_select?: { options: { id: string; name: string; color?: string }[] } }>;
+    properties: Record<
+      string,
+      {
+        id: string;
+        name: string;
+        type: string;
+        select?: { options: { id: string; name: string; color?: string }[] };
+        multi_select?: { options: { id: string; name: string; color?: string }[] };
+      }
+    >;
   }> {
     return this.request("GET", `/v1/data_sources/${dataSourceId}`);
   }
@@ -274,10 +285,11 @@ export class NotionClient {
   }
 
   /**
-   * For each self-healing select property, ensure that all the option names
-   * we're about to set on pages exist in the data source's option list.
-   * Adds missing ones via PATCH. Used by migrate before page creation so
-   * Notion doesn't reject values for unknown options (e.g. a new model ID).
+   * For each self-healing select / multi_select property, ensure that all
+   * the option names we're about to set on pages exist in the data
+   * source's option list. Adds missing ones via PATCH. Used by publish
+   * before page creation so Notion doesn't reject values for unknown
+   * options (e.g. a new model ID, a new tag).
    *
    * `valuesByNotionName` maps Notion column name → set of values that need
    * to exist in that column's option list.
@@ -293,19 +305,30 @@ export class NotionClient {
 
     for (const [notionName, wantedValues] of valuesByNotionName) {
       const def = current.properties[notionName] as
-        | { type: string; select?: { options: Array<{ id: string; name: string; color?: string }> } }
+        | {
+            type: string;
+            select?: { options: Array<{ id: string; name: string; color?: string }> };
+            multi_select?: { options: Array<{ id: string; name: string; color?: string }> };
+          }
         | undefined;
-      if (!def || def.type !== "select") continue;
-      const existing = new Set((def.select?.options ?? []).map((o) => o.name));
+      if (!def) continue;
+      const isSelect = def.type === "select";
+      const isMulti = def.type === "multi_select";
+      if (!isSelect && !isMulti) continue;
+
+      const existingOptions = isSelect ? def.select?.options : def.multi_select?.options;
+      const existing = new Set((existingOptions ?? []).map((o) => o.name));
       const missing = [...wantedValues].filter((v) => !existing.has(v) && v !== "");
       if (missing.length === 0) continue;
 
-      // Preserve existing options + add the missing ones.
       const newOptions = [
-        ...(def.select?.options ?? []).map((o) => ({ name: o.name, color: o.color })),
+        ...(existingOptions ?? []).map((o) => ({ name: o.name, color: o.color })),
         ...missing.map((name) => ({ name, color: "default" })),
       ];
-      propertyPayload[notionName] = { select: { options: newOptions } };
+      const optionsPayload = { options: newOptions };
+      propertyPayload[notionName] = isSelect
+        ? { select: optionsPayload }
+        : { multi_select: optionsPayload };
       report.push({ column: notionName, added: missing });
     }
 
@@ -395,6 +418,15 @@ export function readSelect(
   return sel?.name ?? null;
 }
 
+export function readMultiSelect(
+  props: Record<string, NotionProperty>,
+  name: string,
+): string[] {
+  const p = props[name];
+  if (!p || p.type !== "multi_select" || !Array.isArray(p.multi_select)) return [];
+  return p.multi_select.map((opt) => opt.name).filter((s): s is string => !!s);
+}
+
 // ---------- Schema payload builders ----------
 
 /**
@@ -432,6 +464,9 @@ export function buildPagePropertiesPayload(
   pushSelect(payload, "Agent", props.agent);
   pushSelect(payload, "Shell", props.shell);
 
+  // multi_select fields
+  pushMultiSelect(payload, "Tags", props.tags);
+
   return payload;
 }
 
@@ -467,6 +502,17 @@ function pushSelect(
   payload[notionName] = { select: { name: value } };
 }
 
+function pushMultiSelect(
+  payload: Record<string, unknown>,
+  notionName: string,
+  value: string[] | undefined,
+): void {
+  if (value === undefined || value.length === 0) return;
+  payload[notionName] = {
+    multi_select: value.filter((v) => v && v.trim() !== "").map((name) => ({ name })),
+  };
+}
+
 /**
  * Build the `initial_data_source.properties` block for creating a new
  * database with the full schema.
@@ -487,6 +533,7 @@ function expectedNotionType(kind: PropertyDef["kind"]): string {
     case "list_text": return "rich_text";
     case "checkbox": return "checkbox";
     case "select": return "select";
+    case "multi_select": return "multi_select";
   }
 }
 
@@ -506,6 +553,10 @@ export function propertyDefinitionPayload(prop: PropertyDef): unknown {
     case "select":
       return {
         select: { options: prop.options ?? [{ name: SELECT_DEFAULT }] },
+      };
+    case "multi_select":
+      return {
+        multi_select: { options: prop.options ?? [] },
       };
   }
 }

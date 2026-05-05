@@ -204,6 +204,53 @@ body`,
   rmSync(root, { recursive: true });
 });
 
+test("parseSkillFile: tags as YAML list parsed into properties.tags", async () => {
+  const root = makeFixture();
+  const dir = join(root, "tagged");
+  mkdirSync(dir);
+  writeFileSync(
+    join(dir, "SKILL.md"),
+    `---
+name: tagged
+description: ok.
+tags:
+  - engineering
+  - productivity
+---
+body`,
+  );
+  const result = await parseSkillFile(
+    join(dir, "SKILL.md"),
+    dir,
+    dir,
+    "tagged",
+  );
+  assert.ok("skill" in result);
+  assert.deepEqual(result.skill.properties.tags, ["engineering", "productivity"]);
+  rmSync(root, { recursive: true });
+});
+
+test("parseSkillFile: comma-separated tags parsed into properties.tags", async () => {
+  // Some authors will write `tags: engineering, productivity` instead of
+  // a YAML list. Accept the comma form too.
+  const root = makeFixture();
+  const dir = writeSkill(
+    root,
+    "comma-tagged",
+    { name: "comma-tagged", description: "ok", tags: "engineering, productivity" },
+    "body",
+  );
+  const result = await parseSkillFile(
+    join(dir, "SKILL.md"),
+    dir,
+    dir,
+    "comma-tagged",
+  );
+  assert.ok("skill" in result);
+  assert.deepEqual(result.skill.properties.tags, ["engineering", "productivity"]);
+  rmSync(root, { recursive: true });
+});
+
 test("parseSkillFile: omitted spec fields are undefined", async () => {
   const root = makeFixture();
   const dir = writeSkill(
