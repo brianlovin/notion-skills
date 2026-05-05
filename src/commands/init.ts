@@ -51,6 +51,10 @@ export async function initCommand(): Promise<void> {
   // Installs exist — anything else is added progressively by publish
   // as skills using those properties show up. Stay silent unless we
   // actually changed something.
+  //
+  // Fresh DBs also got their default views (All / Popular / New) at
+  // create time. For linked DBs, scaffold them now — idempotent if
+  // they already exist.
   if (!isFresh) {
     const { added, retyped } = await client.upgradeSchema(dataSourceId, {
       only: new Set(["Description", "Installs"]),
@@ -63,6 +67,7 @@ export async function initCommand(): Promise<void> {
         ),
       );
     }
+    await client.ensureDefaultViews(databaseId, dataSourceId);
   }
 
   // ---- 3. Targets -------------------------------------------------------

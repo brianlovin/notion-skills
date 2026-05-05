@@ -185,11 +185,10 @@ export class NotionClient {
     }
     const dataSourceId = created.data_sources[0]!.id;
 
-    // Set up the auto-provisioned default view's column order so Name +
-    // Description sit side-by-side. Fail-soft: a missing Views API or a
-    // stricter workspace shouldn't stop the user from getting a working
-    // database.
-    await this.reorderDefaultView(dataSourceId);
+    // Scaffold the All / Popular / New default views. Fail-soft: a
+    // missing Views API or a stricter workspace shouldn't stop the user
+    // from getting a working database.
+    await this.ensureDefaultViews(created.id, dataSourceId);
 
     return {
       id: created.id,
@@ -201,33 +200,100 @@ export class NotionClient {
   }
 
   /**
-   * Re-order the data source's default view to match SCHEMA's property
-   * order. Idempotent. Fail-soft — view-API issues never stop the
-   * outer flow.
+   * Make sure the workspace store has the three canonical views the
+   * app-store framing relies on:
+   *   - "All"     — sorted alphabetically by Name (default browse).
+   *   - "Popular" — sorted by Installs descending (which skills are
+   *                 catching on across the team).
+   *   - "New"     — sorted by created_time descending (recent additions).
    *
-   * Used after createSkillsDatabase (initial pin) and after upgradeSchema
-   * adds new columns (so the columns appear in canonical order rather
-   * than whatever order Notion happens to materialise the PATCH in).
+   * Idempotent: if a view by name already exists, PATCH its sort +
+   * column order. Otherwise POST to create it. Skips "Popular" if the
+   * Installs column doesn't exist yet (the install metric layer adds
+   * it on demand).
+   *
+   * Fail-soft: any Views-API error is swallowed (logged in debug mode).
+   * Users still get a working database even if their workspace doesn't
+   * support the Views API.
    */
-  private async reorderDefaultView(dataSourceId: string): Promise<void> {
+  async ensureDefaultViews(
+    databaseId: string,
+    dataSourceId: string,
+  ): Promise<void> {
     try {
-      const search = new URLSearchParams({ data_source_id: dataSourceId });
-      const list = await this.request<{
-        results?: { object: string; id: string }[];
-      }>("GET", `/v1/views?${search.toString()}`);
-      const viewId = list.results?.[0]?.id;
-      if (!viewId) return;
-
       const dataSource = await this.getDataSource(dataSourceId);
-      const configuration = buildViewConfiguration(
-        dataSource.properties as Record<string, { id?: string }>,
-      );
+      const propertiesByName = dataSource.properties as Record<
+        string,
+        { id?: string }
+      >;
+      const configuration = buildViewConfiguration(propertiesByName);
       if (configuration.properties.length === 0) return;
 
-      await this.request("PATCH", `/v1/views/${viewId}`, { configuration });
+      // List existing views; resolve each to its name via a follow-up
+      // GET (the list endpoint returns minimal references — id only).
+      const search = new URLSearchParams({ data_source_id: dataSourceId });
+      const list = await this.request<{
+        results?: Array<{ id: string }>;
+      }>("GET", `/v1/views?${search.toString()}`);
+      const existingByName = new Map<string, string>();
+      for (const v of list.results ?? []) {
+        try {
+          const detail = await this.request<{
+            id: string;
+            name?: string;
+          }>("GET", `/v1/views/${v.id}`);
+          if (detail.name) existingByName.set(detail.name, v.id);
+        } catch {
+          // Skip views we can't fetch.
+        }
+      }
+
+      const desired: Array<{
+        name: string;
+        sorts: Array<{
+          property?: string;
+          timestamp?: string;
+          direction: "ascending" | "descending";
+        }>;
+        skipIf?: () => boolean;
+      }> = [
+        {
+          name: "All",
+          sorts: [{ property: "Name", direction: "ascending" }],
+        },
+        {
+          name: "Popular",
+          sorts: [{ property: "Installs", direction: "descending" }],
+          skipIf: () => !propertiesByName["Installs"]?.id,
+        },
+        {
+          name: "New",
+          sorts: [{ timestamp: "created_time", direction: "descending" }],
+        },
+      ];
+
+      for (const view of desired) {
+        if (view.skipIf?.()) continue;
+        const existingId = existingByName.get(view.name);
+        const payload: Record<string, unknown> = {
+          name: view.name,
+          type: "table",
+          sorts: view.sorts,
+          configuration,
+        };
+        if (existingId) {
+          await this.request("PATCH", `/v1/views/${existingId}`, payload);
+        } else {
+          await this.request("POST", `/v1/views`, {
+            database_id: databaseId,
+            data_source_id: dataSourceId,
+            ...payload,
+          });
+        }
+      }
     } catch (err) {
       if (process.env.NOTION_SKILLS_DEBUG === "1") {
-        console.error("reorderDefaultView failed:", err);
+        console.error("ensureDefaultViews failed:", err);
       }
     }
   }
@@ -281,9 +347,12 @@ export class NotionClient {
     await this.request("PATCH", `/v1/data_sources/${dataSourceId}`, {
       properties: additions,
     });
-    // Resync the default view so freshly-added columns slot into SCHEMA
-    // order instead of being appended in whatever order Notion picks.
-    await this.reorderDefaultView(dataSourceId);
+    // View configuration is owned by ensureDefaultViews — called from
+    // createSkillsDatabase + init. We don't auto-refresh views on every
+    // schema change because it'd mean an extra round of Notion API
+    // calls during install (which itself runs upgradeSchema for the
+    // Installs column). View drift in the rare case of a property-only
+    // schema change is handled by re-running init.
     return { added, retyped };
   }
 
