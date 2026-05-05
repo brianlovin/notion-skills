@@ -340,6 +340,10 @@ export class NotionClient {
     return results;
   }
 
+  async getPage(pageId: string): Promise<NotionPage> {
+    return this.request("GET", `/v1/pages/${pageId}`);
+  }
+
   async getBlockChildren(blockId: string): Promise<NotionBlock[]> {
     const results: NotionBlock[] = [];
     let cursor: string | undefined;

@@ -73,7 +73,7 @@ In Notion that's a row with the title `deslop`, a `Description` property, and th
 | Command | What it does |
 |---|---|
 | `init` | Guided first-time setup. |
-| `sync` | Pull from Notion. Skips unchanged pages. Pull-only — to push local skills, use `init` (first time) or `migrate`. |
+| `sync` | Pull from Notion AND push local edits to skills already in Notion. New local skills (not yet tracked) need `init` or `migrate`. Conflicts resolved last-edit-wins; Notion's page history is the safety net. |
 | `migrate` | Push existing local skills to Notion in bulk. Flags: `--from <path>` (extra source), `--overwrite`, `--dry-run`, `-y` (skip confirm). |
 | `list` | Print every page with sync status. |
 | `status` | Show auth, scope, and per-target symlink health. |
@@ -184,7 +184,9 @@ mv ~/.notion-skills/backup/migrate-<ts>/<skill-name> ~/.claude/skills/
 ## Limitations
 
 - **macOS and Linux only.** Windows symlink support is on the list.
-- **Round-trip normalisation.** Notion's markdown parser tweaks some content on ingest — long YAML descriptions wrap, multi-line paragraphs split into blocks, code-language aliases expand (`ts` → `typescript`), bare domains autolink.
+- **Round-trip normalisation.** Notion's markdown parser tweaks some content on ingest — long YAML descriptions wrap, multi-line paragraphs split into blocks, code-language aliases expand (`ts` → `typescript`), bare domains autolink. After a push, `sync` immediately re-pulls so your local file matches Notion's normalised version; expect minor reformatting of pushed edits.
+- **Conflict resolution is dumb.** When a skill changed on both sides since the last sync, the newer side wins outright — no merge. Notion's page history can restore the loser.
+- **Removing a frontmatter key locally doesn't clear it in Notion.** Local pushes only set values that are present; an absent key is treated as "no change" rather than "clear". To unset a property, edit the Notion page directly.
 - **Performance.** Each API call shells out to `ntn` (~50–100 ms). A first sync of 100 deeply-nested skills takes minutes; subsequent syncs are fast (incremental).
 
 ## Contributing

@@ -12,6 +12,14 @@ export interface ManifestEntry {
    * compare this hash on every sync to detect those.
    */
   props_hash: string;
+  /**
+   * sha256 hash (truncated to 16 chars) of the SKILL.md file as written
+   * to disk by the last sync. Drift on this hash is how `sync` detects
+   * that the user edited a skill locally and needs to push it back to
+   * Notion. Optional: missing on legacy manifests; `sync` re-hashes and
+   * stores it on next write without firing a spurious push.
+   */
+  local_hash?: string;
 }
 
 export interface Manifest {
