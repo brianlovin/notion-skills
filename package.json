@@ -8,13 +8,16 @@
   },
   "files": [
     "dist",
+    "skills",
+    "!skills/_artifacts",
     "README.md"
   ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "npm run build && node --test test/*.test.mjs",
-    "prepublishOnly": "npm run build && npm test"
+    "validate-skills": "intent validate",
+    "prepublishOnly": "npm run build && npm test && npm run validate-skills"
   },
   "engines": {
     "node": ">=18"
@@ -29,7 +32,8 @@
     "gemini",
     "skills",
     "agent",
-    "cli"
+    "cli",
+    "tanstack-intent"
   ],
   "license": "MIT",
   "homepage": "https://github.com/brianlovin/notion-skills",
@@ -50,6 +54,7 @@
     "yaml": "^2.6.1"
   },
   "devDependencies": {
+    "@tanstack/intent": "^0.0.40",
     "@types/node": "^22.10.2",
     "typescript": "^5.7.2"
   }

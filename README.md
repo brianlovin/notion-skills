@@ -49,6 +49,7 @@ Then:
 
 ```bash
 notion-skills list                  # browse the store
+notion-skills list --sort installs  # sort by install count (most popular first)
 notion-skills install <slug>        # install one
 notion-skills install --tag featured  # install all skills tagged "featured"
 notion-skills install --all         # install everything (power-user)
@@ -103,7 +104,7 @@ A skill you have edited locally won't push automatically — `sync` is pull-only
 | Command | What it does |
 |---|---|
 | `init` | Connect to (or create) your workspace skill store. |
-| `list` | Browse what's in the store with state markers (installed, available, outdated, draft). Supports `--installed`, `--available`, `--outdated`, `--drafts`, `--tag <name>`, `--json`. |
+| `list` | Browse what's in the store with state markers (installed, available, outdated, draft). The `↓` next to a row shows its install count. Supports `--installed`, `--available`, `--outdated`, `--drafts`, `--tag <name>`, `--sort installs` (popular first), `--json`. |
 | `install <slug>` / `--tag` / `--all` | Pull a skill from the store onto this machine. |
 | `uninstall <slug>` | Remove a skill from this machine (Notion page is untouched). Auto-backs up local edits. |
 | `gen <input>` | Generate a new skill from a URL, file path, or prompt. The agent writes a local-first draft; review and `publish` when ready. |
@@ -213,7 +214,7 @@ notion-skills publish <slug>   # if you want it back in the store
 
 ## Schema reference
 
-`init` creates the store with `Name` + `Description`. Other columns are added progressively by `publish` when a skill that uses them shows up — most skills never need anything beyond Name + Description + Tags.
+`init` creates the store with `Name` + `Description` + `Installs`, plus three default views (**All** alphabetical, **Popular** sorted by install count, **New** by created date). Other columns are added progressively by `publish` when a skill that uses them shows up — most skills never need anything beyond Name + Description + Tags.
 
 | Property | Frontmatter key | Type |
 |---|---|---|
@@ -232,10 +233,15 @@ notion-skills publish <slug>   # if you want it back in the store
 | `Context` | `context` | select |
 | `Agent` | `agent` | select (self-healing) |
 | `Shell` | `shell` | select |
+| `Installs` | — (not round-tripped) | number |
 
 **Self-healing selects/multi-selects** (`Tags`, `Model`, `Agent`) auto-add new options on publish, so any tag or model name the user types becomes a real Notion option without an upgrade step.
 
 **Defaults** (`disable-model-invocation: false`, `user-invocable: true`, `shell: bash`) are omitted from frontmatter when syncing back to disk.
+
+**`Installs`** is a store-managed counter — incremented +1 by `notion-skills install`. It exists in Notion (so `list --sort installs` and the **Popular** view can rank by it) but never round-trips into SKILL.md frontmatter, so editing it doesn't mark a skill outdated.
+
+**`Tags`** are taxonomy-only: editing them in Notion never marks a skill outdated either, since they don't change how the model executes the skill.
 
 ## Limitations
 
