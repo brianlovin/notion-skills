@@ -30,6 +30,10 @@ import {
   hashBody,
 } from "./page-hash.js";
 import {
+  collidingSlugSet,
+  detectSlugCollisions,
+} from "./slug-collisions.js";
+import {
   ensureSymlink,
   removeSymlink,
   targetSkillPath,
@@ -132,18 +136,12 @@ export async function runSync(
     .map(summarisePage)
     .filter((s) => s !== null) as Array<PageSummary>;
 
-  // Detect slug collisions in the database itself.
-  const slugCounts = new Map<string, number>();
-  for (const s of summaries) {
-    slugCounts.set(s.name, (slugCounts.get(s.name) ?? 0) + 1);
-  }
-  const colliding = new Set(
-    [...slugCounts.entries()].filter(([, n]) => n > 1).map(([name]) => name),
-  );
-  if (colliding.size > 0) {
+  const collisions = detectSlugCollisions(pages);
+  const colliding = collidingSlugSet(collisions);
+  if (collisions.length > 0) {
     warn(
       chalk.yellow(
-        `Skipping ${colliding.size} duplicate ${colliding.size === 1 ? "slug" : "slugs"}: ${[...colliding].join(", ")}. Rename one of the colliding pages in Notion.`,
+        `Skipping ${collisions.length} duplicate ${collisions.length === 1 ? "slug" : "slugs"}: ${collisions.map((c) => c.slug).join(", ")}. Rename one of the colliding pages in Notion.`,
       ),
     );
   }

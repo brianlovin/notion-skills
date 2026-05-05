@@ -10,6 +10,7 @@ import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
 import { findTargetByKey, KNOWN_TARGETS } from "../known-targets.js";
 import { NotionClient } from "../notion.js";
 import { SCHEMA } from "../schema.js";
+import { detectSlugCollisions } from "../slug-collisions.js";
 
 interface DoctorOptions {
   fix?: boolean;
@@ -49,6 +50,7 @@ export async function doctorCommand(opts: DoctorOptions): Promise<void> {
   const ntnOk = checks.every((c) => !c.label.startsWith("ntn") || c.status === "ok");
   if (ntnOk) {
     checks.push(...(await checkSchema(scope)));
+    checks.push(...(await checkSlugCollisions(scope)));
   }
 
   // 4. Manifest / disk consistency
@@ -149,6 +151,40 @@ async function checkSchema(scope: Scope): Promise<CheckResult[]> {
       {
         status: "fail",
         label: "Couldn't reach the Notion database",
+        detail: (err as Error).message.split("\n")[0],
+      },
+    ];
+  }
+}
+
+async function checkSlugCollisions(scope: Scope): Promise<CheckResult[]> {
+  try {
+    const client = new NotionClient();
+    const pages = await client.queryDataSource(scope.data_source_id);
+    const collisions = detectSlugCollisions(pages);
+    if (collisions.length === 0) {
+      return [{ status: "ok", label: "No slug collisions" }];
+    }
+    const lines = collisions.map(
+      (c) => `  ${c.slug}: ${c.titles.join(", ")}`,
+    );
+    return [
+      {
+        status: "warn",
+        label: `${collisions.length} slug ${collisions.length === 1 ? "collision" : "collisions"}: ${collisions.map((c) => c.slug).join(", ")}`,
+        detail:
+          [
+            "Multiple Notion pages slugify to the same name and are skipped by sync / refused by install.",
+            ...lines,
+            "Rename one page in each group to disambiguate.",
+          ].join("\n"),
+      },
+    ];
+  } catch (err) {
+    return [
+      {
+        status: "warn",
+        label: "Couldn't check slug collisions",
         detail: (err as Error).message.split("\n")[0],
       },
     ];

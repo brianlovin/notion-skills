@@ -298,34 +298,46 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
   }
   console.log("");
 
-  // Pad names to the longest in the filtered set (capped at 40) instead
-  // of always padding to 40. Saves a lot of horizontal space when the
-  // skill names are short.
-  const maxName = Math.max(0, ...filtered.map((r) => r.name.length));
+  // Tabular layout: a header row followed by columns aligned by
+  // padding. State marker (1 char) sits in the gutter so the visual
+  // column boundary matches the header. Description is capped so wide
+  // terminals don't sprawl into unreadable lines.
+  const DESC_CAP = 70;
+  const INSTALLS_HEADER = "INSTALLS";
+  const installsWidth = INSTALLS_HEADER.length;
+  const maxName = Math.max(
+    "NAME".length,
+    ...filtered.map((r) => r.name.length),
+  );
   const namePad = Math.min(40, Math.max(maxName, 12));
   const cols = process.stdout.columns ?? 120;
-  // Fixed prefix: "  ✓ " (4) + name (namePad) + " " (1) = namePad + 5
-  // Suffix budget for tags is variable per row; we subtract it before
-  // truncating the description, so longer tag lists get less description.
-  const prefixWidth = 5 + namePad;
+  // 2 (indent) + 2 (marker + space) + namePad + 2 (gap) + installsWidth + 2 (gap)
+  const fixedPrefix = 2 + 2 + namePad + 2 + installsWidth + 2;
+  const descBudget = Math.max(20, Math.min(DESC_CAP, cols - fixedPrefix - 4));
+
+  const header =
+    "  " +
+    "  " +
+    "NAME".padEnd(namePad) +
+    "  " +
+    INSTALLS_HEADER.padStart(installsWidth) +
+    "  " +
+    "DESCRIPTION";
+  console.log(chalk.dim(header));
 
   for (const row of filtered) {
     const mark = stateMarker(row.state);
     const namePadded = row.name.padEnd(namePad);
-    const tagPlain = row.tags.length > 0 ? ` [${row.tags.join(", ")}]` : "";
-    const installsPlain =
-      row.installs > 0 ? ` ${row.installs}↓` : "";
-    const reasonPlain = row.reason ? ` (${row.reason})` : "";
-    const descBudget = Math.max(
-      20,
-      cols - prefixWidth - tagPlain.length - installsPlain.length - reasonPlain.length - 2,
-    );
+    const installsCell =
+      row.installs > 0
+        ? chalk.cyan(String(row.installs).padStart(installsWidth))
+        : " ".repeat(installsWidth);
     const desc = truncate(oneLine(row.description), descBudget);
-    const tagText = tagPlain ? chalk.dim(tagPlain) : "";
-    const installsText = installsPlain ? chalk.cyan(installsPlain) : "";
-    const reason = reasonPlain ? chalk.dim(reasonPlain) : "";
+    const tagText =
+      row.tags.length > 0 ? chalk.dim(` [${row.tags.join(", ")}]`) : "";
+    const reason = row.reason ? chalk.dim(` (${row.reason})`) : "";
     console.log(
-      `  ${mark} ${namePadded} ${chalk.dim(desc)}${tagText}${installsText}${reason}`,
+      `  ${mark} ${namePadded}  ${installsCell}  ${chalk.dim(desc)}${tagText}${reason}`,
     );
   }
 

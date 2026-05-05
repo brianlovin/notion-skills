@@ -24,6 +24,10 @@ import {
   targetsForKeys,
 } from "../targets.js";
 import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
+import {
+  collidingSlugSet,
+  detectSlugCollisions,
+} from "../slug-collisions.js";
 import { startTask } from "./_progress.js";
 
 interface InstallOptions {
@@ -66,6 +70,13 @@ export async function installCommand(
     emptyManifest(scope.database_id, scope.data_source_id);
   const trackedNames = new Set(Object.keys(manifest.skills));
 
+  // Detect colliding slugs before resolving candidates. Direct slug
+  // installs of a colliding name MUST fail — we can't pick which page
+  // the user meant. Bulk modes (--tag, --all) skip them with a warning
+  // and proceed with the unambiguous remainder.
+  const collisions = detectSlugCollisions(pages);
+  const colliding = collidingSlugSet(collisions);
+
   // Build candidate set based on flags.
   interface Candidate {
     name: string;
@@ -79,12 +90,31 @@ export async function installCommand(
     const title = readTitle(page.properties);
     if (!title) continue;
     const name = slugify(title);
+    if (colliding.has(name)) continue;
     allCandidates.push({ name, pageId: page.id, pageIndex: i });
   }
 
   let candidates: Candidate[];
   if (slugs.length > 0) {
     const requested = new Set(slugs);
+
+    // If any requested slug collides, fail loud — we won't silently
+    // pick one of the duplicates.
+    const collidingRequested = collisions.filter((c) => requested.has(c.slug));
+    if (collidingRequested.length > 0) {
+      const lines = collidingRequested.map(
+        (c) =>
+          `  ${c.slug}: ${c.titles.length} pages with the same title (${c.titles.join(", ")})`,
+      );
+      throw new Error(
+        [
+          `Cannot install: the following ${collidingRequested.length === 1 ? "slug is" : "slugs are"} ambiguous in the store.`,
+          ...lines,
+          `Rename one of the colliding pages in Notion, then re-run.`,
+        ].join("\n"),
+      );
+    }
+
     candidates = allCandidates.filter((c) => requested.has(c.name));
     const found = new Set(candidates.map((c) => c.name));
     const missing = [...requested].filter((s) => !found.has(s));
@@ -106,6 +136,16 @@ export async function installCommand(
     }
   } else {
     candidates = allCandidates;
+  }
+
+  // Bulk-mode collision warning: name what we skipped so the user can
+  // go fix it in Notion. Explicit-slug mode already errored above.
+  if (collisions.length > 0 && slugs.length === 0) {
+    console.log(
+      chalk.yellow(
+        `Skipping ${collisions.length} ambiguous ${collisions.length === 1 ? "slug" : "slugs"} (multiple pages share each): ${collisions.map((c) => c.slug).join(", ")}.`,
+      ),
+    );
   }
 
   // Filter out already-installed (idempotent install --all / --tag).

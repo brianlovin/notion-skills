@@ -112,6 +112,7 @@ A skill you have edited locally won't push automatically — `sync` is pull-only
 | `unpublish <slug>` | Remove a skill from the store (Notion page archived). Local copy untouched. |
 | `sync` | Pull updates for installed skills. Pull-only — local edits never flow upstream until you `publish`. |
 | `import [--from <path>]` | Bulk-bring-in pre-existing local skills via a multiselect picker. |
+| `open <slug> [--local\|--with <cmd>\|-a <app>\|--reveal]` | Default: open the Notion page. `--local` uses `$EDITOR`; `--with <cmd>` is portable; `-a <app>` is macOS-style; `--reveal` opens the directory. |
 | `doctor [--fix]` | Inspect for drift; auto-fix safe issues. |
 | `status` | Show auth, scope, and per-target symlink health. |
 | `upgrade` | Add any missing skill-spec properties to your Notion DB schema. |
@@ -243,12 +244,19 @@ notion-skills publish <slug>   # if you want it back in the store
 
 **`Tags`** are taxonomy-only: editing them in Notion never marks a skill outdated either, since they don't change how the model executes the skill.
 
+## Renaming a skill in Notion
+
+The slug is derived from the page title. **Renaming a page in Notion changes its slug**, which means: the previous installation becomes orphaned (still on disk under the old slug, no longer matches any page), the renamed skill shows up as `available` under the new slug, and the install count resets to zero. If you rename, expect to `uninstall <old-slug>` and `install <new-slug>` on every machine.
+
+If two pages share a title, both slugify to the same string. Sync skips them with a warning, `install` refuses them with an error listing the conflicting titles, and `doctor` flags them. Resolve by renaming one of the pages.
+
 ## Limitations
 
 - **macOS and Linux only.** Windows symlink support is on the list.
 - **Round-trip normalisation.** Notion's markdown parser tweaks some content on ingest — long YAML descriptions wrap, multi-line paragraphs split into blocks, code-language aliases expand (`ts` → `typescript`), bare domains autolink. After `publish`, the round-trip writes Notion's normalised version back to disk; expect minor reformatting.
 - **Per-machine install state.** Skills you install on your work laptop don't auto-appear on your home laptop. `install --all` mirrors a fresh machine; richer cross-machine sync is on the v2 list.
 - **Anyone can edit any installed skill.** Edits stay local until `publish`. Page-level Notion permissions are the eventual access-control story.
+- **Slug stability.** Slugs are derived from titles; renaming a Notion page is effectively a re-slug. See [Renaming a skill in Notion](#renaming-a-skill-in-notion).
 - **Performance.** Each API call shells out to `ntn` (~50–100 ms).
 
 ## Contributing

@@ -37,6 +37,7 @@ The verb mapping:
 | Pull updates for installed skills | `sync` |
 | Remove from this machine | `uninstall <slug>` |
 | Retire from the team store | `unpublish <slug>` |
+| Open a skill in Notion (or in a local editor) | `open <slug>` (or `--local`, `--with <cmd>`, `-a <App>`, `--reveal`) |
 | First-time setup | `init` |
 | Diagnose problems | `doctor [--fix]` |
 
@@ -179,9 +180,16 @@ Backups in `~/.notion-skills/backup/` survive this only if you copy them out fir
 
 A `manifest.json` entry is what distinguishes installed from draft. Both are real on-disk skills with symlinks; the manifest just records sync state.
 
+## Slug stability
+
+The slug is derived from the page title. **Renaming a page in Notion is effectively a re-slug**: the old installation becomes orphaned, the renamed skill shows up as a new `available` row, and the install counter resets. Before suggesting a rename, warn the user and tell them they'll need to `uninstall <old-slug> && install <new-slug>` on every machine.
+
+If two pages share a title, both slugify to the same string. `sync` skips them with a warning, `install` refuses them, `doctor` flags them. Resolution: rename one of the pages in Notion.
+
 ## What NOT to do
 
 - Don't manually edit `~/.notion-skills/manifest.json` — it gets rewritten by every command. Hand-edit `scope.json` only.
 - Don't symlink directly between agent dirs (e.g. `~/.codex/skills/foo` → `~/.claude/skills/foo`). The CLI fans out from a single central directory; cross-target symlinks confuse the reconciler.
 - Don't `git clone` skills into a target dir hoping the CLI will manage them. Skills come from the Notion store; if the user wants to bring local skills in, run `notion-skills import [--from <path>]`.
 - Don't run `publish` after `gen` automatically. Drafts are intentional — give the user a chance to review.
+- Don't suggest renaming a Notion page without warning the user about the slug-stability consequences (see above).

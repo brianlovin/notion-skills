@@ -18,6 +18,7 @@ import { importCommand } from "./commands/import.js";
 import { installCommand } from "./commands/install.js";
 import { uninstallCommand } from "./commands/uninstall.js";
 import { unpublishCommand } from "./commands/unpublish.js";
+import { openCommand } from "./commands/open.js";
 
 // Read version from package.json so `--version` stays in sync with bumps
 // without us remembering to edit two places.
@@ -99,9 +100,22 @@ program
   .action(installCommand);
 
 program
+  .command("open")
+  .description("Open a skill in Notion (default), in a local editor, or reveal its directory")
+  .argument("<slug>", "skill slug to open")
+  .option("--local", "open the local SKILL.md with $VISUAL or $EDITOR (fallback `vi`)")
+  .option("--with <command>", "open the local SKILL.md with the given command (e.g. `cursor`, `code -n`)")
+  .option("-a, --app <name>", "macOS-only: open the local SKILL.md in the named app (alias for `open -a`)")
+  .option("--reveal", "reveal the skill's directory in the OS file manager")
+  .action(openCommand);
+
+program
   .command("uninstall")
-  .description("Remove a skill from this machine (Notion page is untouched)")
-  .argument("<slug>", "skill slug to remove")
+  .description("Remove a skill from this machine (Notion page is untouched). Pass slugs, --tag, or --all.")
+  .argument("[slugs...]", "skill slugs to remove")
+  .option("--all", "remove every installed skill on this machine")
+  .option("--tag <tag...>", "remove all installed skills matching these tags (all-must-match)")
+  .option("-y, --yes", "skip the confirmation prompt")
   .action(uninstallCommand);
 
 program
