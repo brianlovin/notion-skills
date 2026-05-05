@@ -17,6 +17,7 @@ import { publishCommand } from "./commands/publish.js";
 import { importCommand } from "./commands/import.js";
 import { installCommand } from "./commands/install.js";
 import { uninstallCommand } from "./commands/uninstall.js";
+import { unpublishCommand } from "./commands/unpublish.js";
 
 // Read version from package.json so `--version` stays in sync with bumps
 // without us remembering to edit two places.
@@ -109,6 +110,13 @@ program
   .option("--all", "publish every local-only skill in the central store")
   .option("-y, --yes", "skip the confirmation prompt")
   .action(publishCommand);
+
+program
+  .command("unpublish")
+  .description("Remove a skill from the workspace store (archives the Notion page)")
+  .argument("<slug>", "skill slug to remove from the store")
+  .option("-y, --yes", "skip the confirmation prompt")
+  .action(unpublishCommand);
 
 program
   .command("import")

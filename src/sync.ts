@@ -6,13 +6,12 @@ import { confirm } from "@inquirer/prompts";
 import {
   NotionClient,
   type NotionPage,
-  type SkillProperties,
   readMultiSelect,
   readRichText,
   readSelect,
   readTitle,
 } from "./notion.js";
-import { assertNtnInstalled, ntnSetPageMarkdown } from "./ntn.js";
+import { assertNtnInstalled } from "./ntn.js";
 import { shouldSyncSkill } from "./filter.js";
 import {
   buildSkillMarkdown,
@@ -35,10 +34,7 @@ import {
 } from "./targets.js";
 import { MANIFEST_FILE, SKILLS_STORE } from "./paths.js";
 import type { Scope } from "./scope.js";
-import { decideSyncAction } from "./sync-decision.js";
-import { detectLocalState, type LocalDriftEntry } from "./local-state.js";
-import { SCHEMA, notionPropsForSkill } from "./schema.js";
-import { parseSkillFile } from "./migrate.js";
+import { detectLocalState } from "./local-state.js";
 
 export interface SyncSummary {
   created: string[];
@@ -66,6 +62,14 @@ export interface RunSyncOptions {
    * Used by `migrate` after it's already shown its own per-skill UI.
    */
   quiet?: boolean;
+  /**
+   * Page IDs to force-refetch even if the manifest's last_edited_time
+   * matches Notion's. Used by `publish`-style flows where a skill's
+   * manifest entry was just written (so the diff says "unchanged") but
+   * we still want to round-trip through Notion's normaliser to capture
+   * the canonical formatting.
+   */
+  extraFetchIds?: Set<string>;
 }
 
 /**
@@ -141,9 +145,22 @@ export async function runSync(
     );
   }
 
+  // App-store rule: sync only operates on skills the user has installed
+  // (i.e. has a manifest entry). New pages in Notion appear in `list`
+  // and have to be explicitly `install`-ed.
+  //
+  // Caller exception: `extraFetchIds` lets publish-style flows include
+  // a page that was JUST uploaded (and therefore not in the manifest
+  // yet) in the pull phase, so we round-trip through Notion's
+  // normalisation and create the manifest entry for it.
+  const trackedNames = new Set(
+    Object.keys((await readManifest(MANIFEST_FILE))?.skills ?? {}),
+  );
+  const extraFetchIds = options.extraFetchIds ?? new Set<string>();
   const kept = summaries
     .filter((s) => !colliding.has(s.name))
-    .filter((s) => shouldSyncSkill(s.name, scope.exclude_skills));
+    .filter((s) => shouldSyncSkill(s.name, scope.exclude_skills))
+    .filter((s) => trackedNames.has(s.name) || extraFetchIds.has(s.id));
 
   // Load manifest, but only honour it if it belongs to the current DB.
   // Otherwise treat as fresh: we don't want a manifest from a previous
@@ -183,78 +200,49 @@ export async function runSync(
   const { drift: localDrift, missingPageIds: missingLocalPageIds } =
     await detectLocalState(oldManifest, contentRoot);
 
-  // ---- Decide what to do for each tracked skill -----------------------
-  const pushCandidates: LocalDriftEntry[] = [];
+  // ---- Drift handling ---------------------------------------------------
+  //
+  // App-store model: pull is implicit, push is explicit. Sync never pushes
+  // local edits — that's `publish`. For each drifted skill:
+  //   - If remote is unchanged: leave local as-is, surface a one-liner
+  //     reminding the user to publish if they want their changes shared.
+  //   - If remote ALSO changed: backup the local edit, then let the pull
+  //     phase overwrite (Notion's version wins, user's local work is
+  //     preserved on disk so they can recover).
   const remoteChangedNames = new Set<string>();
   for (const k of kept) if (diff.toFetch.includes(k.id)) remoteChangedNames.add(k.name);
 
+  const localDriftReminders: string[] = [];
   for (const [name, drift] of localDrift) {
-    const remoteSummary = kept.find((k) => k.name === name);
-    if (!remoteSummary) {
-      // Page is missing in Notion (will fall through to the toRemove
-      // bias-against-deletion path). Don't try to push to a deleted page.
+    const remoteChanged = remoteChangedNames.has(name);
+    if (!remoteChanged) {
+      localDriftReminders.push(name);
       continue;
     }
-    const remoteEdited = new Date(remoteSummary.lastEditedTime);
-    const action = decideSyncAction({
-      localChanged: true,
-      remoteChanged: remoteChangedNames.has(name),
-      localMtime: drift.mtime,
-      remoteEdited,
-    });
-
-    if (action === "push") {
-      pushCandidates.push(drift);
-    } else if (action === "conflict-push") {
-      pushCandidates.push(drift);
-      summary.resolutions.push({
-        name,
-        winner: "local",
-        localEditedAt: drift.mtime.toISOString(),
-        remoteEditedAt: remoteSummary.lastEditedTime,
-      });
+    // Local changed AND remote changed → pull will overwrite. Save the
+    // local edit so the user can recover. Same pattern uninstall uses.
+    try {
+      const backupDir = join(
+        contentRoot,
+        "..",
+        "backup",
+        "sync-overwrite",
+        `${name}-${conflictBackupTimestamp()}`,
+      );
+      await mkdir(backupDir, { recursive: true });
+      await writeFile(join(backupDir, "SKILL.md"), drift.mdContent, "utf8");
       log(
         chalk.yellow(
-          `⚠ ${name}: both sides changed — keeping local (mtime ${drift.mtime.toISOString()} > Notion ${remoteSummary.lastEditedTime}). Notion's page history can restore the prior version.`,
+          `⚠ ${name}: had local edits AND a newer version was published. Backed up your edit to ${backupDir} before pulling.`,
         ),
       );
-    } else if (action === "conflict-pull") {
-      summary.resolutions.push({
-        name,
-        winner: "remote",
-        localEditedAt: drift.mtime.toISOString(),
-        remoteEditedAt: remoteSummary.lastEditedTime,
-      });
-      // Save the local file before overwriting it. The user can recover
-      // their lost edit from ~/.notion-skills/backup/conflicts/<name>-<ts>/.
-      // Notion's history won't help — that shows Notion's previous state,
-      // not the user's discarded local edit.
-      try {
-        const backupDir = join(
-          contentRoot,
-          "..",
-          "backup",
-          "conflicts",
-          `${name}-${conflictBackupTimestamp()}`,
-        );
-        await mkdir(backupDir, { recursive: true });
-        await writeFile(join(backupDir, "SKILL.md"), drift.mdContent, "utf8");
-        log(
-          chalk.yellow(
-            `⚠ ${name}: both sides changed — keeping Notion (Notion ${remoteSummary.lastEditedTime} > local ${drift.mtime.toISOString()}). Your local edit was saved to ${backupDir}.`,
-          ),
-        );
-      } catch {
-        log(
-          chalk.yellow(
-            `⚠ ${name}: both sides changed — keeping Notion (Notion ${remoteSummary.lastEditedTime} > local ${drift.mtime.toISOString()}). Your local edit was overwritten; check Notion's page history if you need to recover.`,
-          ),
-        );
-      }
-      // Pull will overwrite local; the toFetch path already includes this
-      // page id (since remoteChanged). No extra work needed here.
+    } catch {
+      log(
+        chalk.yellow(
+          `⚠ ${name}: had local edits AND a newer version was published. Backup failed; pull will overwrite.`,
+        ),
+      );
     }
-    // skip / pull: no-op here.
   }
 
   // ---- Removal prompt (bias against deletion) -------------------------
@@ -290,118 +278,21 @@ export async function runSync(
     delete nextManifest.skills[name];
   }
 
-  // ---- Push phase ------------------------------------------------------
-  //
-  // Phase 1: parse all locals and aggregate schema/option needs (one
-  //          PATCH each, not N).
-  // Phase 2: per-skill push (properties + body).
-  // Phase 3: re-fetch each pushed page so the next pull writes Notion's
-  //          normalised version back to local. Subsequent syncs see no
-  //          drift and don't loop.
-  const pushedPageIds = new Set<string>();
-  const pushedNames = new Set<string>();
-  if (pushCandidates.length > 0) {
-    log(chalk.bold(`Pushing ${pushCandidates.length} local ${pushCandidates.length === 1 ? "edit" : "edits"}:`));
-
-    interface ParsedPush {
-      name: string;
-      pageId: string;
-      props: SkillProperties;
-      body: string;
-    }
-    const parsed: ParsedPush[] = [];
-    for (const c of pushCandidates) {
-      const file = join(contentRoot, c.name, "SKILL.md");
-      const result = await parseSkillFile(file, join(contentRoot, c.name), file, c.name);
-      if ("error" in result) {
-        summary.invalid.push({ title: c.name, reason: `local edit: ${result.error}` });
-        log(`  ${chalk.yellow("!")} ${c.name} ${chalk.dim(`(local edit: ${result.error})`)}`);
-        continue;
-      }
-      parsed.push({
-        name: c.name,
-        pageId: c.pageId,
-        props: result.skill.properties,
-        body: result.skill.body,
-      });
-    }
-
-    // Aggregate schema + option needs.
-    const neededProps = new Set<string>();
-    const selectValues = new Map<string, Set<string>>();
-    for (const p of parsed) {
-      const propBag = p.props as unknown as Record<string, unknown>;
-      for (const c of notionPropsForSkill(propBag)) neededProps.add(c);
-      for (const def of SCHEMA) {
-        if (def.kind !== "select" || !def.selfHealing) continue;
-        const v = propBag[def.frontmatterKey];
-        if (typeof v !== "string" || v === "" || v === "default") continue;
-        let bag = selectValues.get(def.notionName);
-        if (!bag) { bag = new Set(); selectValues.set(def.notionName, bag); }
-        bag.add(v);
-      }
-    }
-    if (neededProps.size > 0) {
-      await client.upgradeSchema(scope.data_source_id, { only: neededProps });
-    }
-    if (selectValues.size > 0) {
-      await client.ensureSelectOptions(scope.data_source_id, selectValues);
-    }
-
-    // Push each.
-    for (const p of parsed) {
-      try {
-        await client.updateSkillPageProperties(p.pageId, p.props);
-        if (p.body.trim()) {
-          await ntnSetPageMarkdown(p.pageId, p.body);
-        }
-        pushedPageIds.add(p.pageId);
-        pushedNames.add(p.name);
-        summary.pushed.push(p.name);
-        log(`  ${chalk.green("↑")} ${p.name}`);
-      } catch (err) {
-        summary.invalid.push({ title: p.name, reason: `push failed: ${(err as Error).message.split("\n")[0]}` });
-        log(`  ${chalk.red("✗")} ${p.name} ${chalk.dim(`(push failed: ${(err as Error).message.split("\n")[0]})`)}`);
-      }
-    }
-
-    // Refresh pushed pages so the pull phase writes Notion's normalised
-    // version (and we capture the post-push last_edited_time / props_hash).
-    for (const pageId of pushedPageIds) {
-      try {
-        const fresh = await client.getPage(pageId);
-        const pidx = pages.findIndex((p) => p.id === pageId);
-        if (pidx >= 0) pages[pidx] = fresh;
-        const newSummary = summarisePage(fresh);
-        if (!newSummary) continue;
-        const kidx = kept.findIndex((k) => k.id === pageId);
-        if (kidx >= 0) kept[kidx] = newSummary;
-      } catch {
-        // Refresh failure is non-fatal: the next sync will reconcile.
-      }
-    }
-  }
-
   // ---- Pull phase ------------------------------------------------------
   //
-  // Build the to-fetch set: anything diff said to fetch, plus everything
-  // we just pushed (so we round-trip through Notion's normaliser), plus
-  // anything whose local SKILL.md has gone missing (so the user can rm
-  // and re-pull).
+  // Build the to-fetch set: anything diff said to fetch, plus anything
+  // whose local SKILL.md has gone missing (so the user can rm and
+  // re-pull), plus anything the caller explicitly forced (publish-side
+  // round-trip).
   const toFetchIds = new Set<string>([
     ...diff.toFetch,
-    ...pushedPageIds,
     ...missingLocalPageIds,
+    ...(options.extraFetchIds ?? []),
   ]);
   const toFetch = kept.filter((k) => toFetchIds.has(k.id));
 
-  // Visible pulls: pages we'd print a per-skill line for (i.e. not just
-  // post-push round-trips, which we suppress to avoid double-counting).
-  const visiblePullCount = toFetch.filter(
-    (k) => !pushedPageIds.has(k.id),
-  ).length;
-  if (visiblePullCount > 0) {
-    log(chalk.dim(`Pulling ${visiblePullCount} ${visiblePullCount === 1 ? "page" : "pages"}:`));
+  if (toFetch.length > 0) {
+    log(chalk.dim(`Pulling ${toFetch.length} ${toFetch.length === 1 ? "page" : "pages"}:`));
   }
 
   const verbose = process.env.NOTION_SKILLS_DEBUG === "1";
@@ -427,14 +318,9 @@ export async function runSync(
     await mkdir(skillDir, { recursive: true });
     await writeFile(join(skillDir, "SKILL.md"), md, "utf8");
 
-    const wasPush = pushedPageIds.has(skill.pageId);
     const wasNew = !oldManifest.skills[skillName];
-    if (!wasPush) {
-      // A push already counted this skill in `summary.pushed`; don't
-      // double-count it as updated/created.
-      if (wasNew) summary.created.push(skillName);
-      else summary.updated.push(skillName);
-    }
+    if (wasNew) summary.created.push(skillName);
+    else summary.updated.push(skillName);
 
     const matchingSummary = kept.find((k) => k.id === skill.pageId);
     nextManifest.skills[skillName] = {
@@ -444,11 +330,8 @@ export async function runSync(
       local_hash: hashContent(md),
     };
 
-    // Per-skill mark: ↑ if just pushed (round-tripped), ↓ for pull-only.
-    if (!wasPush) {
-      const mark = wasNew ? chalk.green("+") : chalk.cyan("↓");
-      log(`  ${mark} ${skillName}`);
-    }
+    const mark = wasNew ? chalk.green("+") : chalk.cyan("↓");
+    log(`  ${mark} ${skillName}`);
   }
 
   // ---- Backfill local_hash for skills the manifest already tracked ----
@@ -504,17 +387,24 @@ export async function runSync(
     }
   }
 
-  // Compute unchanged for the summary AFTER push/pull resolution so the
-  // count reflects only "neither side changed AND not force-pulled"
-  // entries. A force-pull (pushed-then-roundtripped, or restored after
-  // local file went missing) shouldn't count as unchanged.
+  // Compute unchanged for the summary AFTER pull so the count reflects
+  // only "neither side changed AND not force-pulled" entries.
   const touchedPageIds = new Set(toFetch.map((k) => k.id));
   summary.unchanged = diff.unchanged.filter((name) => {
-    if (pushedNames.has(name)) return false;
     const entry = nextManifest.skills[name];
     if (entry && touchedPageIds.has(entry.page_id)) return false;
     return true;
   });
+
+  // Surface drift reminders at the end, after the pull phase, so they
+  // show up on the same screen as the rest of the summary.
+  for (const name of localDriftReminders) {
+    log(
+      chalk.yellow(
+        `↑ ${name}: you have local edits — run \`notion-skills publish ${name}\` to share them with your team.`,
+      ),
+    );
+  }
 
   await writeManifest(manifestPath, nextManifest);
   return summary;

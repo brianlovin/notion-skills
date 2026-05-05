@@ -291,13 +291,19 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   // ---------- Phase 3: silent reconciliation ----------
   //
   // Pull the freshly-written pages back into the central store and link
-  // them into the user's target dirs. Everything we just uploaded is now
-  // in Notion, so this is purely housekeeping — show a single heartbeat
-  // line instead of restating the skill list.
+  // them into the user's target dirs. The just-published pages don't
+  // have manifest entries yet, so sync's narrow "installed only" filter
+  // would skip them — pass extraFetchIds to opt them in for this run.
+  const justPushedIds = new Set(
+    [...created, ...updated].map((r) => r.pageId),
+  );
   const reconcile = startTask("Linking skills locally");
   let summary;
   try {
-    summary = await runSync(scope, { quiet: true });
+    summary = await runSync(scope, {
+      quiet: true,
+      extraFetchIds: justPushedIds,
+    });
     reconcile.done();
   } catch (err) {
     reconcile.fail((err as Error).message.split("\n")[0]);
