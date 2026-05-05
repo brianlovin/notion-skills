@@ -7,10 +7,9 @@
  * `kind` controls the type-specific read/write logic:
  *   - "title"      → page title; the only required, name-bearing property
  *   - "rich_text"  → plain string; empty cell omits the frontmatter key
- *   - "checkbox"   → boolean (used for our internal Tags property only)
+ *   - "checkbox"   → boolean
  *   - "select"     → string from a fixed option set; "default" / empty omit
  *   - "list_text"  → list serialised as space- or comma-separated rich_text
- *   - "multi_select" → multi-select tags (used for Tags filter only)
  *
  * Selects that have a spec default expose a "default" option; the empty cell
  * also maps to "default" for users who haven't picked anything.
@@ -23,8 +22,7 @@ export type PropertyKind =
   | "rich_text"
   | "checkbox"
   | "select"
-  | "list_text"
-  | "multi_select";
+  | "list_text";
 
 export interface SelectOption {
   name: string;
@@ -183,12 +181,6 @@ export const SCHEMA: PropertyDef[] = [
       { name: "powershell", color: "blue" },
     ],
     description: "Shell for inline command injection (default: bash)",
-  },
-  {
-    notionName: "Tags",
-    frontmatterKey: "_tags", // not in spec; consumed by filter, not emitted to SKILL.md
-    kind: "multi_select",
-    description: "Filter tags (notion-skills internal — not in skill spec)",
   },
 ];
 

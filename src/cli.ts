@@ -9,7 +9,6 @@ import { initCommand } from "./commands/init.js";
 import { syncCommand } from "./commands/sync.js";
 import { listCommand } from "./commands/list.js";
 import { statusCommand } from "./commands/status.js";
-import { tagsCommand } from "./commands/tags.js";
 import { migrateCommand } from "./commands/migrate.js";
 import { upgradeCommand } from "./commands/upgrade.js";
 import { doctorCommand } from "./commands/doctor.js";
@@ -48,7 +47,6 @@ program
 program
   .command("sync")
   .description("Sync skills from Notion to local agent directories")
-  .argument("[names...]", "specific skill names to include this run")
   .action(syncCommand);
 
 program
@@ -60,11 +58,6 @@ program
   .command("status")
   .description("Show what skills are currently synced and where")
   .action(statusCommand);
-
-program
-  .command("tags")
-  .description("Edit tag include/exclude filters interactively")
-  .action(tagsCommand);
 
 program
   .command("doctor")

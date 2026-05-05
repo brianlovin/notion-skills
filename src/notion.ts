@@ -26,8 +26,6 @@ export interface SkillProperties {
   context?: string;
   agent?: string;
   shell?: string;
-  /** Internal-only: filter tags. Not in the spec; not emitted to SKILL.md. */
-  tags?: string[];
 }
 
 export interface NotionPage {
@@ -332,29 +330,6 @@ export function readRichText(
   return p.rich_text.map((r) => r.plain_text).join("").trim();
 }
 
-export function readMultiSelect(
-  props: Record<string, NotionProperty>,
-  name: string,
-): string[] {
-  const p = props[name];
-  if (!p || p.type !== "multi_select" || !Array.isArray(p.multi_select)) return [];
-  return p.multi_select.map((s) => s.name);
-}
-
-export function findMultiSelectProperty(
-  dataSource: { properties: Record<string, { type: string; name: string; multi_select?: { options: { name: string }[] } }> },
-  preferredName: string,
-): { name: string; options: string[] } | null {
-  const props = dataSource.properties;
-  // Prefer exact match (case-insensitive)
-  for (const [_, def] of Object.entries(props)) {
-    if (def.type === "multi_select" && def.name.toLowerCase() === preferredName.toLowerCase()) {
-      return { name: def.name, options: (def.multi_select?.options ?? []).map((o) => o.name) };
-    }
-  }
-  return null;
-}
-
 export function readSelect(
   props: Record<string, NotionProperty>,
   name: string,
@@ -401,11 +376,6 @@ export function buildPagePropertiesPayload(
   pushSelect(payload, "Context", props.context);
   pushSelect(payload, "Agent", props.agent);
   pushSelect(payload, "Shell", props.shell);
-
-  // multi_select (Tags — internal)
-  if (props.tags !== undefined) {
-    payload.Tags = { multi_select: props.tags.map((name) => ({ name })) };
-  }
 
   return payload;
 }
@@ -462,7 +432,6 @@ function expectedNotionType(kind: PropertyDef["kind"]): string {
     case "list_text": return "rich_text";
     case "checkbox": return "checkbox";
     case "select": return "select";
-    case "multi_select": return "multi_select";
   }
 }
 
@@ -483,7 +452,5 @@ export function propertyDefinitionPayload(prop: PropertyDef): unknown {
       return {
         select: { options: prop.options ?? [{ name: SELECT_DEFAULT }] },
       };
-    case "multi_select":
-      return { multi_select: { options: prop.options ?? [] } };
   }
 }

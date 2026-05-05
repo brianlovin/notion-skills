@@ -124,15 +124,6 @@ test("buildSkillMarkdown: emits model + effort + context + agent", () => {
   assert.match(md, /^agent: Explore/m);
 });
 
-test("buildSkillMarkdown: tags are NOT emitted (internal-only)", () => {
-  const md = buildSkillMarkdown({
-    properties: { name: "x", description: "ok", tags: ["frontend", "tooling"] },
-    body: "body",
-  });
-  assert.doesNotMatch(md, /^tags:/m);
-  assert.doesNotMatch(md, /^_tags:/m);
-});
-
 test("buildSkillMarkdown: empty arrays don't get emitted", () => {
   const md = buildSkillMarkdown({
     properties: {

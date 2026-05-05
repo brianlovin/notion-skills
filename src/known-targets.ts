@@ -33,13 +33,13 @@ export interface TargetDef {
 export const KNOWN_TARGETS: TargetDef[] = [
   {
     key: "claude",
-    label: "Claude Code",
+    label: "Claude",
     dir: join(HOME, ".claude", "skills"),
     docs: "https://code.claude.com/docs/en/skills",
   },
   {
     key: "codex",
-    label: "Codex CLI",
+    label: "Codex",
     dir: join(HOME, ".codex", "skills"),
     docs: "https://github.com/openai/codex",
   },
@@ -60,7 +60,7 @@ export const KNOWN_TARGETS: TargetDef[] = [
   },
   {
     key: "gemini",
-    label: "Gemini CLI",
+    label: "Gemini",
     dir: join(HOME, ".gemini", "skills"),
     docs: "https://geminicli.com/docs/cli/tutorials/skills-getting-started/",
   },

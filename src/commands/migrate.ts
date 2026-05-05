@@ -3,7 +3,7 @@ import { confirm } from "@inquirer/prompts";
 import { existsSync } from "node:fs";
 import { mkdir, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { getScope, writeScope } from "../scope.js";
+import { getScope } from "../scope.js";
 import { NotionClient } from "../notion.js";
 import { assertNtnInstalled, ntnSetPageMarkdown } from "../ntn.js";
 import {
@@ -17,12 +17,20 @@ import { SCHEMA } from "../schema.js";
 import { findTargetByKey } from "../known-targets.js";
 import { ROOT_DIR } from "../paths.js";
 import { runSync, printSummary } from "../sync.js";
+import { startTask } from "./_progress.js";
 
 interface MigrateOptions {
   from?: string[];
   overwrite?: boolean;
   dryRun?: boolean;
   yes?: boolean;
+  /**
+   * Restrict the migration to these slugs. Skills not in the set are
+   * silently dropped (managed/invalid are also dropped). Used by `init`
+   * and `sync` after they've shown a multiselect picker; the user has
+   * already curated the list, so don't re-litigate it here.
+   */
+  only?: string[];
 }
 
 export async function migrateCommand(opts: MigrateOptions): Promise<void> {
@@ -45,20 +53,31 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
     targetDirs: scopeTargetDirs,
   });
 
-  console.log(chalk.bold(`Sources:`));
-  for (const dir of sourceDirs) {
-    console.log(`  ${dir}${existsSync(dir) ? "" : chalk.dim(" (does not exist)")}`);
+  // Caller-curated runs (init/sync) suppress the source/probe prelude —
+  // they already showed the user the picker, so an extra "Sources:" +
+  // "Checking Notion..." preamble is just noise.
+  const verbose = !opts.only;
+
+  if (verbose) {
+    console.log(chalk.bold(`Sources:`));
+    for (const dir of sourceDirs) {
+      console.log(`  ${dir}${existsSync(dir) ? "" : chalk.dim(" (does not exist)")}`);
+    }
+    console.log("");
   }
-  console.log("");
 
   // Discovery + initial classification.
   let classifications = await discoverSkills({ sourceDirs });
 
   // Conflict detection: query Notion for existing slugs.
   const client = new NotionClient();
-  process.stdout.write(chalk.dim("Checking Notion for existing skills... "));
+  if (verbose) {
+    process.stdout.write(chalk.dim("Checking Notion for existing skills... "));
+  }
   const existing = await client.queryDataSource(scope.data_source_id);
-  console.log(chalk.green("✓") + chalk.dim(` ${existing.length} pages`));
+  if (verbose) {
+    console.log(chalk.green("✓") + chalk.dim(` ${existing.length} pages`));
+  }
 
   const existingByName = new Map<string, { pageId: string; title: string }>();
   for (const page of existing) {
@@ -77,8 +96,21 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
 
   classifications = markConflicts(classifications, existingByName);
 
-  // Print classification summary.
-  printClassifications(classifications, opts);
+  if (opts.only) {
+    const onlySet = new Set(opts.only);
+    classifications = classifications.filter((c) => {
+      if (c.kind === "new" || c.kind === "conflict") {
+        return onlySet.has(c.skill.name);
+      }
+      return false;
+    });
+  }
+
+  // Print classification summary only for standalone runs. The picker
+  // already summarised the selection in init/sync.
+  if (verbose) {
+    printClassifications(classifications, opts);
+  }
 
   // Determine candidates to act on.
   const willCreate = classifications.filter((c) => c.kind === "new");
@@ -119,16 +151,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   // be added before the page-create call (Notion rejects unknown options).
   const selfHealing = collectSelfHealingValues([...willCreate, ...willOverwrite]);
   if (selfHealing.size > 0) {
-    const reports = await client.ensureSelectOptions(
-      scope.data_source_id,
-      selfHealing,
-    );
-    if (reports.length > 0) {
-      console.log(chalk.dim("Added select options:"));
-      for (const r of reports) {
-        console.log(`  ${chalk.green("+")} ${r.column}: ${r.added.join(", ")}`);
-      }
-    }
+    await client.ensureSelectOptions(scope.data_source_id, selfHealing);
   }
 
   // ---------- Phase 1: write to Notion ----------
@@ -142,8 +165,11 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   // when the Notion write succeeds: the canonical source + any
   // identical-content duplicates + any conflicting copies. We back them
   // ALL up so no stale non-symlink dirs are left in target dirs.
+  console.log(chalk.bold(`\nUploading ${total} ${total === 1 ? "skill" : "skills"}:`));
+
   const created: { name: string; pageId: string; sources: string[] }[] = [];
   const updated: { name: string; pageId: string; sources: string[] }[] = [];
+  const failed: string[] = [];
 
   const allSources = (s: Classification): string[] => {
     if (s.kind !== "new" && s.kind !== "conflict") return [];
@@ -156,6 +182,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
 
   for (const c of willCreate) {
     if (c.kind !== "new") continue;
+    const task = startTask(c.skill.name);
     try {
       const pageId = await client.createSkillPage(
         scope.data_source_id,
@@ -165,16 +192,16 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
         await ntnSetPageMarkdown(pageId, c.skill.body);
       }
       created.push({ name: c.skill.name, pageId, sources: allSources(c) });
-      console.log(`  ${chalk.green("+")} ${c.skill.name}`);
+      task.done();
     } catch (err) {
-      console.log(
-        `  ${chalk.red("✗")} ${c.skill.name} ${chalk.dim(`(${(err as Error).message.split("\n")[0]})`)}`,
-      );
+      failed.push(c.skill.name);
+      task.fail((err as Error).message.split("\n")[0]);
     }
   }
 
   for (const c of willOverwrite) {
     if (c.kind !== "conflict") continue;
+    const task = startTask(c.skill.name);
     try {
       await client.updateSkillPageProperties(
         c.existingPageId,
@@ -188,11 +215,10 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
         pageId: c.existingPageId,
         sources: allSources(c),
       });
-      console.log(`  ${chalk.cyan("~")} ${c.skill.name}`);
+      task.done("(updated)");
     } catch (err) {
-      console.log(
-        `  ${chalk.red("✗")} ${c.skill.name} ${chalk.dim(`(${(err as Error).message.split("\n")[0]})`)}`,
-      );
+      failed.push(c.skill.name);
+      task.fail((err as Error).message.split("\n")[0]);
     }
   }
 
@@ -206,6 +232,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   const ts = timestamp();
   const backupRoot = join(ROOT_DIR, "backup", `migrate-${ts}`);
   let backupCreated = false;
+  const backupWarnings: string[] = [];
 
   for (const result of [...created, ...updated]) {
     let copyIndex = 0;
@@ -214,7 +241,6 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
 
       if (!backupCreated) {
         await mkdir(backupRoot, { recursive: true });
-        console.log(chalk.dim(`Backing up local copies to ${backupRoot}`));
         backupCreated = true;
       }
 
@@ -226,61 +252,53 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
         await mkdir(dirname(dest), { recursive: true });
         await rename(src, dest);
       } catch (err) {
-        console.warn(
-          chalk.yellow(
-            `  ! could not back up ${src}: ${(err as Error).message}`,
-          ),
-        );
+        backupWarnings.push(`${src}: ${(err as Error).message}`);
       }
       copyIndex++;
     }
   }
 
-  // Auto-extend include_skills so filter doesn't hide the freshly-migrated
-  // skills on the next sync.
-  const newIncludeSkills = new Set(scope.filter.include_skills ?? []);
-  for (const c of [...willCreate, ...willOverwrite]) {
-    if (c.kind === "new" || c.kind === "conflict") {
-      newIncludeSkills.add(c.skill.name);
-    }
+  // ---------- Phase 3: silent reconciliation ----------
+  //
+  // Pull the freshly-written pages back into the central store and link
+  // them into the user's target dirs. Everything we just uploaded is now
+  // in Notion, so this is purely housekeeping — show a single heartbeat
+  // line instead of restating the skill list.
+  const reconcile = startTask("Linking skills locally");
+  let summary;
+  try {
+    summary = await runSync(scope, { quiet: true });
+    reconcile.done();
+  } catch (err) {
+    reconcile.fail((err as Error).message.split("\n")[0]);
+    throw err;
   }
-  const updatedFilter = {
-    ...scope.filter,
-    include_skills: [...newIncludeSkills],
-  };
-  await writeScope({
-    database_id: scope.database_id,
-    data_source_id: scope.data_source_id,
-    database_title: scope.database_title,
-    targets: scope.targets,
-    filter: updatedFilter,
-  });
-  if (newIncludeSkills.size > (scope.filter.include_skills?.length ?? 0)) {
+
+  // ---------- Summary ----------
+  const totalDone = created.length + updated.length;
+  console.log("");
+  if (failed.length === 0) {
     console.log(
-      chalk.dim(
-        `Extended scope.filter.include_skills with: ${[...willCreate, ...willOverwrite]
-          .map((c) => (c.kind === "new" || c.kind === "conflict" ? c.skill.name : ""))
-          .filter(Boolean)
-          .join(", ")}`,
+      chalk.green(`✓ Migrated ${totalDone} ${totalDone === 1 ? "skill" : "skills"}.`),
+    );
+  } else {
+    console.log(
+      chalk.yellow(
+        `Migrated ${totalDone} of ${totalDone + failed.length} skills (${failed.length} failed):`,
       ),
     );
+    for (const name of failed) console.log(`  ${chalk.red("✗")} ${name}`);
   }
-
-  // Final sync to populate central store + symlinks.
-  console.log(chalk.bold(`\nSyncing...`));
-  // Reload scope so sync sees the updated filter.
-  const reloaded = await getScope();
-  if (!reloaded) throw new Error("scope vanished mid-migration");
-  const summary = await runSync(reloaded);
-  printSummary(summary);
-
-  const totalDone = created.length + updated.length;
-  console.log(
-    chalk.green(
-      `✓ Migrated ${totalDone} ${totalDone === 1 ? "skill" : "skills"}.` +
-        (backupCreated ? ` Backup at ${backupRoot}` : ""),
-    ),
-  );
+  if (backupCreated) {
+    console.log(chalk.dim(`Backup saved to ${home(backupRoot)}`));
+  }
+  for (const w of backupWarnings) {
+    console.warn(chalk.yellow(`  ! could not back up ${w}`));
+  }
+  if (summary.invalid.length > 0 || summary.conflicts.length > 0) {
+    // Surface anything runSync flagged in its (otherwise-quiet) pass.
+    printSummary(summary);
+  }
 }
 
 function printClassifications(

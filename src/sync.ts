@@ -2,18 +2,17 @@ import chalk from "chalk";
 import { existsSync, lstatSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { confirm } from "@inquirer/prompts";
 import {
   NotionClient,
   type NotionPage,
-  readMultiSelect,
   readRichText,
   readSelect,
   readTitle,
 } from "./notion.js";
 import { assertNtnInstalled } from "./ntn.js";
-import { decide } from "./filter.js";
+import { shouldSyncSkill } from "./filter.js";
 import {
-  type ConvertedPage,
   buildSkillMarkdown,
   convertPageToSkill,
   slugify,
@@ -35,8 +34,6 @@ import {
 import { MANIFEST_FILE, SKILLS_STORE } from "./paths.js";
 import type { Scope } from "./scope.js";
 
-const TAGS_PROPERTY = "Tags";
-
 export interface SyncSummary {
   created: string[];
   updated: string[];
@@ -46,12 +43,35 @@ export interface SyncSummary {
   conflicts: { name: string; target: string }[];
 }
 
+export interface RunSyncOptions {
+  /**
+   * When true, suppress all console output and skip the
+   * bias-against-deletion confirm prompt (locals are preserved by default).
+   * Used by `migrate` after it's already shown its own per-skill UI.
+   */
+  quiet?: boolean;
+}
+
+/**
+ * Pull from Notion to local. Bias against deletion: when Notion has fewer
+ * skills than the local manifest expected, prompt before removing locals.
+ *
+ * Safety rule: if the on-disk manifest references a different database
+ * than the current scope, treat as fresh — don't apply that manifest's
+ * "missing" set as deletions, since those entries belong to a different
+ * DB. Locals are preserved; the user can offer to upload them to the new
+ * DB after the pull completes.
+ */
 export async function runSync(
   scope: Scope,
-  ephemeralNames: string[] = [],
+  options: RunSyncOptions = {},
 ): Promise<SyncSummary> {
   await assertNtnInstalled();
   const client = new NotionClient();
+  const quiet = !!options.quiet;
+  const log = (s: string) => { if (!quiet) console.log(s); };
+  const warn = (s: string) => { if (!quiet) console.warn(s); };
+  const write = (s: string) => { if (!quiet) process.stdout.write(s); };
 
   const summary: SyncSummary = {
     created: [],
@@ -62,20 +82,17 @@ export async function runSync(
     conflicts: [],
   };
 
-  process.stdout.write(chalk.dim(`Querying ${scope.database_title ?? "database"}... `));
+  write(chalk.dim(`Querying ${scope.database_title ?? "database"}... `));
   const pages = await client.queryDataSource(scope.data_source_id);
-  console.log(chalk.green(`✓`) + chalk.dim(` ${pages.length} pages`));
+  log(chalk.green(`✓`) + chalk.dim(` ${pages.length} pages`));
 
-  // First pass: derive name + tags + description + edited time without
-  // fetching block content. We need the property data here so the manifest
-  // diff can detect property-only changes (tags, description) which Notion
-  // does NOT reflect in last_edited_time.
+  // Derive name + property hash without fetching block content.
   const summaries = pages
     .filter((p) => !p.archived && !p.in_trash)
     .map(summarisePage)
     .filter((s) => s !== null) as Array<PageSummary>;
 
-  // Detect slug collisions.
+  // Detect slug collisions in the database itself.
   const slugCounts = new Map<string, number>();
   for (const s of summaries) {
     slugCounts.set(s.name, (slugCounts.get(s.name) ?? 0) + 1);
@@ -84,25 +101,36 @@ export async function runSync(
     [...slugCounts.entries()].filter(([, n]) => n > 1).map(([name]) => name),
   );
   if (colliding.size > 0) {
-    console.warn(
+    warn(
       chalk.yellow(
         `Skipping ${colliding.size} duplicate slug(s): ${[...colliding].join(", ")}. Rename one of the colliding pages in Notion.`,
       ),
     );
   }
-  const uniqueSummaries = summaries.filter((s) => !colliding.has(s.name));
 
-  // Apply filter.
-  const kept = uniqueSummaries.filter(
-    (s) => decide({ name: s.name, tags: s.tags }, scope.filter, ephemeralNames).keep,
-  );
+  const kept = summaries
+    .filter((s) => !colliding.has(s.name))
+    .filter((s) => shouldSyncSkill(s.name, scope.exclude_skills));
 
-  // Load/init manifest.
+  // Load manifest, but only honour it if it belongs to the current DB.
+  // Otherwise treat as fresh: we don't want a manifest from a previous
+  // database to drive deletions against locals.
   const manifestPath = MANIFEST_FILE;
   const contentRoot = SKILLS_STORE;
+  const onDiskManifest = await readManifest(manifestPath);
+  const dbChanged =
+    !!onDiskManifest && onDiskManifest.database_id !== scope.database_id;
+  if (dbChanged) {
+    log(
+      chalk.dim(
+        `Configured database changed since last sync — local skills will be preserved.`,
+      ),
+    );
+  }
   const oldManifest =
-    (await readManifest(manifestPath)) ??
-    emptyManifest(scope.database_id, scope.data_source_id);
+    onDiskManifest && !dbChanged
+      ? onDiskManifest
+      : emptyManifest(scope.database_id, scope.data_source_id);
 
   const diff = diffManifest(
     oldManifest,
@@ -116,7 +144,27 @@ export async function runSync(
 
   summary.unchanged = diff.unchanged;
 
-  // Update manifest as we go.
+  // Decide which (if any) manifest entries to actually remove. We bias
+  // against deletion: prompt the user with default N. Pages that are no
+  // longer in Notion are typically intentional (the user trashed them),
+  // but we never want to silently nuke locals.
+  let approvedRemovals: string[] = [];
+  if (diff.toRemove.length > 0 && process.stdin.isTTY && !quiet) {
+    console.log("");
+    console.log(
+      chalk.yellow(
+        `${diff.toRemove.length} ${diff.toRemove.length === 1 ? "skill is" : "skills are"} no longer in Notion:`,
+      ),
+    );
+    for (const n of diff.toRemove) console.log(`  ${chalk.dim("·")} ${n}`);
+    const ok = await confirm({
+      message: "Remove them locally to match?",
+      default: false,
+    });
+    if (ok) approvedRemovals = diff.toRemove;
+  }
+
+  // Build the next manifest from the old, then layer changes.
   const nextManifest: Manifest = {
     version: 1,
     database_id: scope.database_id,
@@ -125,7 +173,11 @@ export async function runSync(
     skills: { ...oldManifest.skills },
   };
 
-  // Drop entries for skills that fell out of the keep set.
+  // Approved removals get dropped from manifest + central store + target
+  // symlinks. Declined removals get dropped from MANIFEST only — the
+  // central-store dirs and symlinks stay so the user keeps the content.
+  // On the next sync those locals appear as "not in Notion" and are
+  // offered for upload.
   for (const name of diff.toRemove) {
     delete nextManifest.skills[name];
   }
@@ -135,7 +187,7 @@ export async function runSync(
   const verbose = process.env.NOTION_SKILLS_DEBUG === "1";
 
   if (toFetch.length > 0) {
-    console.log(chalk.dim(`Converting ${toFetch.length} page(s):`));
+    log(chalk.dim(`Converting ${toFetch.length} page(s):`));
   }
 
   for (let i = 0; i < toFetch.length; i++) {
@@ -145,12 +197,10 @@ export async function runSync(
       console.error(`${counter} Fetching "${summary_page.title}" (${summary_page.id})...`);
     }
     const page = pages.find((p) => p.id === summary_page.id)!;
-    const converted = await convertPageToSkill(client, page, {
-      tagsProperty: TAGS_PROPERTY,
-    });
+    const converted = await convertPageToSkill(client, page);
     if (!converted.ok) {
       summary.invalid.push({ title: summary_page.title, reason: converted.reason });
-      console.log(`  ${counter} ${chalk.yellow("!")} ${summary_page.title} ${chalk.dim(`(${converted.reason})`)}`);
+      log(`  ${counter} ${chalk.yellow("!")} ${summary_page.title} ${chalk.dim(`(${converted.reason})`)}`);
       continue;
     }
     const skill = converted.skill;
@@ -175,11 +225,11 @@ export async function runSync(
     };
 
     const mark = wasNew ? chalk.green("+") : chalk.cyan("~");
-    console.log(`  ${counter} ${mark} ${skillName}`);
+    log(`  ${counter} ${mark} ${skillName}`);
   }
 
-  // Remove obsolete skills from disk.
-  for (const name of diff.toRemove) {
+  // Remove only the approved set from disk.
+  for (const name of approvedRemovals) {
     const skillDir = join(contentRoot, name);
     if (existsSync(skillDir)) {
       await rm(skillDir, { recursive: true, force: true });
@@ -187,9 +237,7 @@ export async function runSync(
     summary.removed.push(name);
   }
 
-  // Reconcile target dirs: each agent CLI gets a symlink to the central
-  // store for every kept skill, and the symlink for any removed skill is
-  // cleaned up.
+  // Reconcile target dirs.
   const targets = targetsForKeys(scope.targets);
   for (const t of targets) {
     for (const name of Object.keys(nextManifest.skills)) {
@@ -200,7 +248,7 @@ export async function runSync(
         summary.conflicts.push({ name, target: link });
       }
     }
-    for (const name of diff.toRemove) {
+    for (const name of approvedRemovals) {
       const link = targetSkillPath(t, name);
       await removeSymlink(link);
     }
@@ -214,7 +262,6 @@ interface PageSummary {
   id: string;
   title: string;
   name: string;
-  tags: string[];
   description: string;
   lastEditedTime: string;
   /** Hash over every spec-mapped property; used by manifest diff. */
@@ -224,10 +271,8 @@ interface PageSummary {
 function summarisePage(page: NotionPage): PageSummary | null {
   const title = readTitle(page.properties);
   if (!title) return null;
-  const tags = readMultiSelect(page.properties, TAGS_PROPERTY);
   const description = readRichText(page.properties, "Description");
 
-  // Build a stable hash key from every spec-mapped property.
   const propBag = readSpecPropertyBag(page);
   const propsHash = hashContent(JSON.stringify(propBag));
 
@@ -235,7 +280,6 @@ function summarisePage(page: NotionPage): PageSummary | null {
     id: page.id,
     title,
     name: slugify(title),
-    tags,
     description,
     lastEditedTime: page.last_edited_time,
     propsHash,
@@ -261,7 +305,6 @@ function readSpecPropertyBag(page: NotionPage): Record<string, unknown> {
   out.context = readSelect(page.properties, "Context");
   out.agent = readSelect(page.properties, "Agent");
   out.shell = readSelect(page.properties, "Shell");
-  out.tags = [...readMultiSelect(page.properties, TAGS_PROPERTY)].sort();
   return out;
 }
 
@@ -294,6 +337,3 @@ export function printSummary(summary: SyncSummary): void {
   }
   console.log("");
 }
-
-// Re-export for command files
-export { lstatSync };

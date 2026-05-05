@@ -2,7 +2,6 @@ import { stringify as yamlStringify } from "yaml";
 import type { NotionBlock, NotionPage, NotionRichText } from "./notion.js";
 import {
   NotionClient,
-  readMultiSelect,
   readRichText,
   readSelect,
   readTitle,
@@ -49,8 +48,6 @@ export function buildSkillMarkdown(opts: {
 }): string {
   const fm: Record<string, unknown> = {};
   for (const prop of SCHEMA) {
-    if (prop.kind === "multi_select") continue; // Tags isn't in the spec; not emitted
-
     const key = prop.frontmatterKey;
     const value = (opts.properties as unknown as Record<string, unknown>)[key];
 
@@ -87,7 +84,6 @@ export type ConvertedPage =
 export async function convertPageToSkill(
   client: NotionClient,
   page: NotionPage,
-  options: { tagsProperty?: string } = {},
 ): Promise<ConvertedPage> {
   if (page.archived || page.in_trash) return { ok: false, reason: "archived" };
 
@@ -100,8 +96,7 @@ export async function convertPageToSkill(
   const blocks = await fetchBlockTree(client, page.id);
   const body = renderBlocks(blocks, 0);
 
-  const tagsName = options.tagsProperty ?? "Tags";
-  const properties = readSkillPropertiesFromPage(page, tagsName, slugify(title), description);
+  const properties = readSkillPropertiesFromPage(page, slugify(title), description);
   return {
     ok: true,
     skill: {
@@ -126,7 +121,6 @@ export async function convertPageToSkill(
  */
 function readSkillPropertiesFromPage(
   page: NotionPage,
-  tagsPropertyName: string,
   name: string,
   description: string,
 ): SkillProperties {
@@ -173,10 +167,6 @@ function readSkillPropertiesFromPage(
   props.context = select("Context");
   props.agent = select("Agent");
   props.shell = select("Shell");
-
-  // Tags is internal — used by filter, not emitted to SKILL.md frontmatter.
-  const tags = readMultiSelect(page.properties, tagsPropertyName);
-  if (tags.length) props.tags = tags;
 
   return props;
 }

@@ -30,8 +30,9 @@ export async function statusCommand(): Promise<void> {
   if (scope) {
     console.log(`  database: ${scope.database_title ?? scope.database_id}`);
     console.log(`  targets:  ${scope.targets.join(", ") || chalk.dim("(none)")}`);
-    const filterDesc = describeFilter(scope.filter);
-    if (filterDesc) console.log(`  filter:   ${filterDesc}`);
+    if (scope.exclude_skills && scope.exclude_skills.length > 0) {
+      console.log(`  exclude:  ${scope.exclude_skills.join(", ")}`);
+    }
 
     const manifest = await readManifest(MANIFEST_FILE);
     if (manifest) {
@@ -73,20 +74,6 @@ export async function statusCommand(): Promise<void> {
     const exists = existsSync(t.dir);
     console.log(chalk.dim(`  ${t.label.padEnd(14)} ${t.dir} ${exists ? "✓" : "○"}`));
   }
-}
-
-function describeFilter(filter: {
-  include_tags?: string[];
-  exclude_tags?: string[];
-  include_skills?: string[];
-  exclude_skills?: string[];
-}): string {
-  const parts: string[] = [];
-  if (filter.include_tags?.length) parts.push(`+tags=${filter.include_tags.join(",")}`);
-  if (filter.exclude_tags?.length) parts.push(`-tags=${filter.exclude_tags.join(",")}`);
-  if (filter.include_skills?.length) parts.push(`+${filter.include_skills.join(",")}`);
-  if (filter.exclude_skills?.length) parts.push(`-${filter.exclude_skills.join(",")}`);
-  return parts.length === 0 ? chalk.dim("(none)") : parts.join("  ");
 }
 
 function safeLstatExists(p: string): boolean {

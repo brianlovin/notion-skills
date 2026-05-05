@@ -7,7 +7,7 @@ export interface ManifestEntry {
   /** Edited timestamp from the Notion API; covers content-block changes. */
   last_edited_time: string;
   /**
-   * Hash of all spec properties (description + tags + when_to_use + ...).
+   * Hash of all spec properties (description + when_to_use + model + ...).
    * Notion does NOT bump last_edited_time for property-only edits, so we
    * compare this hash on every sync to detect those.
    */
@@ -83,7 +83,7 @@ export interface CurrentPageSummary {
   pageId: string;
   lastEditedTime: string;
   /**
-   * Hash over every spec property of this page (description, tags, model,
+   * Hash over every spec property of this page (description, model,
    * effort, etc). Notion does NOT bump last_edited_time for property-only
    * edits, so we compare this to catch them.
    */

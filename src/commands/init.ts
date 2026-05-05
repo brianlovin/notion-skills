@@ -1,32 +1,29 @@
 import chalk from "chalk";
-import { dirname } from "node:path";
-import { checkbox, confirm, input, select } from "@inquirer/prompts";
-import { NotionClient, findMultiSelectProperty } from "../notion.js";
-import { getScope, writeScope } from "../scope.js";
+import { checkbox, input, select } from "@inquirer/prompts";
+import open from "open";
+import { NotionClient } from "../notion.js";
+import { writeScope } from "../scope.js";
 import { detectTargets } from "../targets.js";
 import { KNOWN_TARGETS } from "../known-targets.js";
 import { type TargetKey } from "../paths.js";
 import { assertNtnInstalled } from "../ntn.js";
 import { parseNotionId } from "../parse-id.js";
-import { discoverSkills, type Classification, type ParsedSkill } from "../migrate.js";
+import { discoverSkills, type Classification } from "../migrate.js";
 import { migrateCommand } from "./migrate.js";
-import { runSync, printSummary } from "../sync.js";
+import { pickLocalSkillsToUpload } from "./_pick-locals.js";
 
 /**
  * Wizard flow:
  *
- *   1. "Already have a Skills database in Notion?"
- *      yes → paste URL → connect
- *      no  → name → create at workspace root
+ *   1. "Create a new database, or link an existing one?" (default = create)
  *   2. Auto-upgrade schema (no warnings — just make it right)
- *   3. Pick sync targets and tag filter
+ *   3. Pick sync targets (parent dir of each known target gates default-on)
  *   4. Save scope
- *   5. Run sync (for connect-existing this pulls down whatever's already
- *      in the DB as symlinks; for create-new it's a no-op against an empty
- *      DB, used to populate the manifest)
- *   6. Scan local skills NOT yet in the DB; if any exist, show preview
- *      with sources/conflicts and ask if the user wants to upload them
- *   7. Print summary with the DB URL
+ *   5. For new DBs: open the freshly-created database in the browser so the
+ *      user can start adding rows immediately
+ *   6. Scan local skills NOT yet in the DB; if any exist, show preview and
+ *      offer to upload them now via migrate
+ *   7. Print summary with the DB URL and "next: notion-skills sync"
  */
 export async function initCommand(): Promise<void> {
   await assertNtnInstalled();
@@ -34,10 +31,10 @@ export async function initCommand(): Promise<void> {
 
   // ---- 1. Connect or create the database -------------------------------
   const useExisting = await select({
-    message: "Already have a Skills database in Notion?",
+    message: "Set up a skills database:",
     choices: [
-      { name: "No — create one for me", value: false },
-      { name: "Yes — I have a database I want to use", value: true },
+      { name: "Create a new skills database", value: false },
+      { name: "Link an existing skills database", value: true },
     ],
     default: false,
   });
@@ -56,67 +53,46 @@ export async function initCommand(): Promise<void> {
     console.log(chalk.green(`✓ added ${added.length}, retyped ${retyped.length}`));
   }
 
-  // ---- 3. Tags + targets -----------------------------------------------
-  const dataSource = await client.getDataSource(dataSourceId);
-  const tagsProp = findMultiSelectProperty(dataSource as any, "Tags");
-  const includeTags =
-    tagsProp && tagsProp.options.length
-      ? await checkbox({
-          message: "Include tags (leave empty for all):",
-          choices: tagsProp.options.map((t) => ({ name: t, value: t })),
-          required: false,
-        })
-      : [];
-  const excludeTags =
-    tagsProp && tagsProp.options.length && includeTags.length === 0
-      ? await checkbox({
-          message: "Exclude tags (leave empty for none):",
-          choices: tagsProp.options
-            .filter((t) => !includeTags.includes(t))
-            .map((t) => ({ name: t, value: t })),
-          required: false,
-        })
-      : [];
+  // ---- 3. Targets -------------------------------------------------------
+  const targets = await pickTargets();
 
   // ---- 4. Persist scope ------------------------------------------------
-  const targets = await pickTargets();
   await writeScope({
     database_id: databaseId,
     data_source_id: dataSourceId,
     database_title: databaseTitle,
     targets,
-    filter: { include_tags: includeTags, exclude_tags: excludeTags },
   });
   console.log(chalk.green(`✓ Saved scope (targets: ${targets.join(", ")})`));
 
-  // ---- 5. Initial sync -------------------------------------------------
-  // For connect-existing this pulls down whatever's in the DB. For
-  // create-new it's a no-op against an empty DB but populates the
-  // manifest so subsequent local-skill detection knows what's "managed"
-  // vs "new".
-  if (!isFresh) {
-    const reloaded = await getScope();
-    if (reloaded) {
-      const summary = await runSync(reloaded);
-      printSummary(summary);
+  // ---- 5. Auto-open new DB in browser ----------------------------------
+  if (isFresh) {
+    try {
+      await open(databaseUrl);
+    } catch {
+      // best-effort; the URL is also printed below
     }
   }
 
   // ---- 6. Detect local skills not yet in Notion ------------------------
-  const targetDirs = KNOWN_TARGETS.map((t) => t.dir);
+  // Only scan dirs the user opted into as sync targets — surfacing a skill
+  // from an unselected agent (e.g. ~/.cursor/skills when Cursor isn't a
+  // target) would falsely suggest it'd get migrated, and migrate would
+  // skip it because that dir isn't in scope.
+  const targetDirs = targets
+    .map((k) => KNOWN_TARGETS.find((t) => t.key === k)?.dir)
+    .filter((d): d is string => !!d);
   const found = await discoverSkills({ sourceDirs: targetDirs });
   const newCandidates = found.filter(
     (c): c is Classification & { kind: "new" } => c.kind === "new",
   );
 
   if (newCandidates.length > 0) {
-    printLocalSkillPreview(newCandidates.map((c) => c.skill));
-    const upload = await confirm({
-      message: `Upload ${newCandidates.length === 1 ? "this skill" : `these ${newCandidates.length} skills`} to Notion now?`,
-      default: true,
-    });
-    if (upload) {
-      await migrateCommand({ yes: true });
+    const picked = await pickLocalSkillsToUpload(
+      newCandidates.map((c) => c.skill),
+    );
+    if (picked.length > 0) {
+      await migrateCommand({ yes: true, only: picked });
     }
   }
 
@@ -217,69 +193,12 @@ async function pickTargets(): Promise<TargetKey[]> {
     checked: t.installed,
   }));
   const picked = await checkbox({
-    message: "Sync to which agent CLIs?",
+    message: "Which agents do you use?",
     choices,
     required: true,
     validate: (vals) => (vals.length === 0 ? "Pick at least one." : true),
   });
   return picked.length > 0 ? picked : KNOWN_TARGETS.map((t) => t.key);
-}
-
-/**
- * Render the discovered local skills as a preview the user can scan
- * before opting into migration. Shows source dirs and flags any
- * multi-target conflicts (same slug, different content).
- */
-function printLocalSkillPreview(skills: ParsedSkill[]): void {
-  const total = skills.length;
-  console.log("");
-  console.log(
-    chalk.bold(
-      total === 1
-        ? `Found 1 local skill on this machine that isn't in Notion yet:`
-        : `Found ${total} local skills on this machine that aren't in Notion yet:`,
-    ),
-  );
-  console.log("");
-  for (const s of skills) {
-    const dirs = describeSources(s);
-    const namePadded = s.name.padEnd(36);
-    const desc = chalk.dim(s.description.slice(0, 60));
-    console.log(`  ${chalk.green("•")} ${namePadded} ${chalk.dim(dirs)}`);
-    if (desc) console.log(`    ${desc}`);
-    if (s.conflictingSourceDisplays && s.conflictingSourceDisplays.length > 0) {
-      const conflicts = s.conflictingSourceDisplays
-        .map((p) => homeRelative(parentOf(p)))
-        .join(", ");
-      console.log(
-        chalk.yellow(
-          `    ⚠ also exists in ${conflicts} with different content — ${homeRelative(parentOf(s.sourceDisplay))} version will win`,
-        ),
-      );
-    }
-  }
-  console.log("");
-}
-
-/**
- * Sources are listed by where we SCANNED them (sourceDisplay) rather than
- * where they ultimately resolve to (realpath). For a symlink at
- * ~/.claude/skills/foo pointing at ~/.agents/skills/foo, we want users to
- * see "~/.claude/skills" — the dir under our control, not the deep target
- * that's incidental to where notion-skills will write.
- */
-function describeSources(s: ParsedSkill): string {
-  const all = [s.sourceDisplay, ...(s.additionalSourceDisplays ?? [])];
-  return all.map((p) => homeRelative(parentOf(p))).join(", ");
-}
-
-function parentOf(p: string): string {
-  return dirname(p);
-}
-
-function homeRelative(p: string): string {
-  const home = process.env.HOME;
-  return home && p.startsWith(home) ? "~" + p.slice(home.length) : p;
 }
 
 function printDoneBanner(args: { isFresh: boolean; databaseUrl: string }): void {

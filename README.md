@@ -13,7 +13,6 @@ Modern AI coding agents (Claude Code, Codex, OpenCode, Cursor, Gemini CLI) all r
 - ✏️ **Author in Notion's UI** — page title is the skill name, properties map to frontmatter, page body is the SKILL.md content. No git, no markdown editor, no PR review.
 - 👥 **Share across a team** — point teammates at the same Notion DB; each runs `sync` to get the same skills.
 - 🎯 **Multi-agent** — one source of truth, fan out to every agent CLI you use. Skills land via symlinks so an edit in Notion updates every CLI on the next sync.
-- 🔍 **Selectively sync** — tag-based filtering means a 200-skill team DB can hand each engineer just the 30 they care about.
 
 ## Prerequisites
 
@@ -51,7 +50,6 @@ If `ntn doctor` is green, you're ready.
 ```bash
 npm install -g @brianlovin/notion-skills
 notion-skills --version
-# → 0.1.0
 ```
 
 ## Quick start
@@ -71,12 +69,12 @@ notion-skills init
 
 `init` is a guided wizard. It asks:
 
-1. **Database** — already have one in Notion? Paste the URL. Don't have one yet? It creates one for you at the workspace root.
+1. **Database** — by default, creates a new Skills database at your workspace root and opens it in your browser. You can also link an existing one by URL.
 2. **Schema upgrade** — auto-runs if your DB is missing the properties the skill spec needs.
-3. **Targets** — which agent CLIs to sync to (Claude Code, Codex, OpenCode, Cursor, Gemini).
-4. **Tag filter** — optional. Pick include/exclude tags so you only sync the skills you care about.
-5. **Migrate locals** — if you already have skills in `~/.claude/skills/` etc., it offers to push them up to Notion in one shot.
-6. **First sync** — pulls everything down as symlinks into your selected target dirs.
+3. **Targets** — which agent CLIs to sync to (Claude Code, Codex, OpenCode, Cursor, Gemini). Defaults to whichever you have installed.
+4. **Migrate locals** — if you already have skills in `~/.claude/skills/` etc., it offers to push them up to Notion in one shot.
+
+Then run `notion-skills sync` to pull everything down as symlinks into your selected target dirs.
 
 Now you can:
 
@@ -111,13 +109,12 @@ In Notion, that becomes a database row:
 | Command | What it does |
 |---|---|
 | `notion-skills init` | Guided wizard for first-time setup. |
-| `notion-skills sync [names…]` | Pull pages, write skills, reconcile target dirs. Skips unchanged pages. |
-| `notion-skills status` | Show auth, scope, filter, per-target symlink health. |
+| `notion-skills sync` | Pull pages, write skills, reconcile target dirs. Skips unchanged pages. Offers to upload local-only skills after pulling. |
+| `notion-skills status` | Show auth, scope, per-target symlink health. |
 | `notion-skills doctor [--fix]` | Inspect for drift; safe auto-repairs with `--fix`. |
-| `notion-skills list` | Print every page in the DB with status: ✓ synced / ✗ filtered / ○ available / ! invalid. |
+| `notion-skills list` | Print every page in the DB with status: ✓ synced / ✗ excluded / ○ available / ! invalid. |
 | `notion-skills upgrade` | Add any missing skill-spec properties to your Notion DB schema. |
 | `notion-skills migrate [--from <path>] [--overwrite] [--dry-run]` | Push existing local skills into Notion, sync back as symlinks. |
-| `notion-skills tags` | Interactive include/exclude tag filter editor. |
 | `notion-skills login` / `logout` | Thin wrappers over `ntn login` / `ntn logout`. |
 
 Run any command with `--help` for full options.
@@ -134,10 +131,11 @@ Walks you through connecting (or creating) a Notion database, picking which agen
 
 ```bash
 notion-skills sync                    # pull the latest from Notion
-notion-skills sync docker terraform   # one-off: force-include these skills for this run
 ```
 
 `sync` is incremental — it only re-fetches pages whose `last_edited_time` or properties have changed since the last sync.
+
+If a page in Notion has been trashed since the last sync, `sync` prompts before deleting the local copy (default: keep). Local skills that don't exist in Notion are surfaced after the pull, with an option to upload them.
 
 ### `migrate` — move existing skills into Notion
 
@@ -182,28 +180,20 @@ State lives at `~/.notion-skills/` and fans out via symlinks to your home-dir ag
 
 Pick any combination during `init`. Adding a new agent is one entry in [`src/known-targets.ts`](src/known-targets.ts) — PRs welcome.
 
-### Filtering — only the skills you care about
+### Excluding specific skills
 
-A team's Notion DB might have hundreds of skills. Edit `~/.notion-skills/scope.json` to filter:
+`sync` syncs every skill in the database by default. If there's a skill you don't want on this machine, add its slug to the optional `exclude_skills` array in `~/.notion-skills/scope.json`:
 
 ```jsonc
 {
-  "filter": {
-    "include_tags": ["frontend", "tooling"],
-    "exclude_tags": ["legacy"],
-    "include_skills": ["docker"],   // always include, regardless of tags
-    "exclude_skills": ["broken"]    // always exclude
-  }
+  "database_id": "...",
+  "data_source_id": "...",
+  "targets": ["claude", "codex"],
+  "exclude_skills": ["broken-skill"]
 }
 ```
 
-Resolution order: `exclude_skills` → `include_skills` → `include_tags` → `exclude_tags` → keep.
-
-Or use the interactive editor:
-
-```bash
-notion-skills tags
-```
+There's no command for this — denylists are rare enough that hand-editing the JSON is the right knob.
 
 ### Schema
 
@@ -225,7 +215,6 @@ notion-skills tags
 | `Context` | `context` | select |
 | `Agent` | `agent` | select (self-healing) |
 | `Shell` | `shell` | select |
-| `Tags` | (internal — used for filtering) | multi_select |
 
 **Self-healing selects** (`Model`, `Agent`) auto-add new options when migrate encounters them — so you can use `agent: my-custom-subagent` without pre-registering the option.
 
@@ -251,8 +240,6 @@ notion-skills tags
 
 Everyone on the team runs `notion-skills init` once and points at the team's Notion database. From then on, `notion-skills sync` keeps everyone aligned. Editing in Notion is the canonical path; new skills authored by anyone propagate to teammates the next time they sync.
 
-For per-user filtering (e.g., engineers on the iOS team only want iOS-tagged skills), use `notion-skills tags` to set include/exclude lists locally — these stay on each person's machine.
-
 ### Migrating from `~/.claude/skills/` files
 
 If you've been authoring skills as files (or symlinks from a shared repo like agent-config), `init` already detects them and offers to upload in one shot. To re-run that step later:
@@ -268,7 +255,7 @@ Locals are moved to `~/.notion-skills/backup/migrate-<ts>/` after Notion confirm
 
 ```
 ~/.notion-skills/
-├── scope.json              # database id, sync targets, filter
+├── scope.json              # database id, sync targets, optional exclude list
 ├── manifest.json           # sync state (atomic writes)
 ├── skills/<name>/          # central source-of-truth
 └── backup/migrate-<ts>/    # local copies displaced during migrate

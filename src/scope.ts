@@ -2,35 +2,39 @@ import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { SCOPE_FILE } from "./paths.js";
 
-export interface FilterConfig {
-  include_tags?: string[];
-  exclude_tags?: string[];
-  include_skills?: string[];
-  exclude_skills?: string[];
-}
-
 export interface Scope {
   database_id: string;
   data_source_id: string;
   database_title?: string;
   targets: string[];
-  filter: FilterConfig;
+  /**
+   * Optional denylist: skill slugs we should NOT sync. Defaults to syncing
+   * everything in the database. Edit the JSON file by hand to set; there's
+   * no UI for it (rare enough to not warrant a command).
+   */
+  exclude_skills?: string[];
   /** Path to the scope file on disk. */
   path: string;
 }
 
+/**
+ * Raw on-disk shape. We accept exclude_skills either at top-level (current
+ * shape) or under a legacy `filter` object (pre-v0.3) for backwards
+ * compatibility on read; we always write the new shape.
+ */
 interface RawScope {
   database_id: string;
   data_source_id: string;
   database_title?: string;
   targets?: string[];
-  filter?: FilterConfig;
+  exclude_skills?: string[];
+  filter?: { exclude_skills?: string[] };
 }
 
 /**
  * Load the active scope from `~/.notion-skills/scope.json`.
- * Returns null if the file doesn't exist (i.e., notion-skills hasn't
- * been initialised yet).
+ * Returns null if the file doesn't exist (notion-skills hasn't been
+ * initialised yet).
  */
 export async function getScope(): Promise<Scope | null> {
   const raw = await readJson<RawScope>(SCOPE_FILE);
@@ -39,8 +43,8 @@ export async function getScope(): Promise<Scope | null> {
     database_id: raw.database_id,
     data_source_id: raw.data_source_id,
     database_title: raw.database_title,
-    filter: raw.filter ?? {},
     targets: raw.targets ?? [],
+    exclude_skills: raw.exclude_skills ?? raw.filter?.exclude_skills,
     path: SCOPE_FILE,
   };
 }
@@ -51,7 +55,7 @@ export async function writeScope(scope: Omit<Scope, "path">): Promise<void> {
     data_source_id: scope.data_source_id,
     database_title: scope.database_title,
     targets: scope.targets,
-    filter: scope.filter,
+    exclude_skills: scope.exclude_skills,
   };
   await writeJson(SCOPE_FILE, payload);
 }
