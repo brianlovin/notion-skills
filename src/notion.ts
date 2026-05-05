@@ -128,6 +128,39 @@ export class NotionClient {
     return created.id;
   }
 
+  /**
+   * Create an empty child page under a parent page. Used to publish
+   * sibling files (e.g. LANGUAGE.md, scripts/search.ts) as child pages
+   * on a skill row. Body is set separately via `ntnSetPageMarkdown`.
+   *
+   * The title is the file's relative path from the skill dir; we store
+   * it verbatim in the page title (Notion accepts slashes in titles).
+   */
+  async createChildPage(
+    parentPageId: string,
+    title: string,
+  ): Promise<string> {
+    const body: Record<string, unknown> = {
+      parent: { type: "page_id", page_id: parentPageId },
+      properties: {
+        title: {
+          title: [{ type: "text", text: { content: title } }],
+        },
+      },
+      children: [],
+    };
+    const created = await this.request<{ id: string }>("POST", "/v1/pages", body);
+    return created.id;
+  }
+
+  /**
+   * Archive (soft-delete) a page. Used to retire orphaned child
+   * pages whose underlying file no longer exists locally.
+   */
+  async archivePage(pageId: string): Promise<void> {
+    await this.request("PATCH", `/v1/pages/${pageId}`, { archived: true });
+  }
+
   /** Patch a page's properties without touching its content. */
   async updateSkillPageProperties(
     pageId: string,

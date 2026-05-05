@@ -180,6 +180,25 @@ Backups in `~/.notion-skills/backup/` survive this only if you copy them out fir
 
 A `manifest.json` entry is what distinguishes installed from draft. Both are real on-disk skills with symlinks; the manifest just records sync state.
 
+## Multi-file skills
+
+A skill is a directory. Beyond `SKILL.md`, sibling files (e.g. `LANGUAGE.md`, `scripts/search.ts`) round-trip through Notion as child pages on the skill's row.
+
+- **Markdown** sibling files: child page body = file content verbatim.
+- **Source code** files (.ts, .py, .sh, etc.): child page body = a single fenced code block, no prose.
+- **Unsupported** file types (binary, unknown extension): publish skips with a warning.
+
+When users ask about authoring a multi-file skill, the layout to use:
+
+```
+my-skill/
+├── SKILL.md
+├── LANGUAGE.md            (markdown sibling)
+└── scripts/search.ts      (code sibling, lives at scripts/search.ts on disk)
+```
+
+`publish` upserts the child pages. `install` / `sync` materializes them back to disk. Deleting a local sibling file and re-publishing archives the matching child page in Notion.
+
 ## Slug stability
 
 The slug is derived from the page title. **Renaming a page in Notion is effectively a re-slug**: the old installation becomes orphaned, the renamed skill shows up as a new `available` row, and the install counter resets. Before suggesting a rename, warn the user and tell them they'll need to `uninstall <old-slug> && install <new-slug>` on every machine.

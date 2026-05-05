@@ -24,6 +24,7 @@ import {
   targetsForKeys,
 } from "../targets.js";
 import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
+import { materializeFiles } from "../skill-files.js";
 import {
   collidingSlugSet,
   detectSlugCollisions,
@@ -220,6 +221,12 @@ export async function installCommand(
       const dir = join(SKILLS_STORE, skill.properties.name);
       await mkdir(dir, { recursive: true });
       await writeFile(join(dir, "SKILL.md"), md, "utf8");
+
+      // Materialize sibling files (multi-file skills). Each file is
+      // round-tripped through a child page on the row; here we write
+      // its content back to disk at the relative path encoded in the
+      // page title.
+      await materializeFiles(dir, skill.files);
 
       nextManifest.skills[skill.properties.name] = {
         page_id: skill.pageId,

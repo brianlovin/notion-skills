@@ -244,6 +244,25 @@ notion-skills publish <slug>   # if you want it back in the store
 
 **`Tags`** are taxonomy-only: editing them in Notion never marks a skill outdated either, since they don't change how the model executes the skill.
 
+## Multi-file skills
+
+A skill is a directory: alongside `SKILL.md`, you can ship sibling files (e.g. `LANGUAGE.md`, `scripts/search-icons.ts`). On publish, each non-`SKILL.md` file becomes a child page on the skill's row in Notion. The page's title carries the relative path; the body shape depends on the file kind:
+
+- **Markdown** sibling files round-trip verbatim.
+- **Source code** files (`.ts`, `.py`, `.sh`, etc.) round-trip as a single fenced code block — no prose, just the source — so installing brings the file back byte-identical.
+
+Unsupported file types (binaries, unknown extensions) are skipped on publish with a warning. Notion file uploads will land on the v0.7+ list.
+
+When the local file is deleted and you `publish` again, the matching child page in Notion is archived. When a child page in Notion is archived (or never existed), the next `install` / `sync` won't materialize it locally.
+
+```
+my-skill/
+├── SKILL.md              ← row body
+├── LANGUAGE.md           ← child page "LANGUAGE.md"
+└── scripts/
+    └── search.ts         ← child page "scripts/search.ts"
+```
+
 ## Renaming a skill in Notion
 
 The slug is derived from the page title. **Renaming a page in Notion changes its slug**, which means: the previous installation becomes orphaned (still on disk under the old slug, no longer matches any page), the renamed skill shows up as `available` under the new slug, and the install count resets to zero. If you rename, expect to `uninstall <old-slug>` and `install <new-slug>` on every machine.

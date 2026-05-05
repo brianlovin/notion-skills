@@ -7,13 +7,22 @@ import {
   readSelect,
   readTitle,
 } from "./notion.js";
+import {
+  parseFromChildPage,
+  type SkillFile,
+} from "./skill-files.js";
 
-export interface SkillFile {
+export interface ConvertedSkill {
   /** Full set of frontmatter fields from the Notion page. */
   properties: SkillProperties;
   body: string;
   pageId: string;
   lastEditedTime: string;
+  /**
+   * Sibling files round-tripped through child pages on the row. Empty
+   * for simple single-file skills. See src/skill-files.ts for shape.
+   */
+  files: SkillFile[];
 }
 
 // ---------- slugify ----------
@@ -83,7 +92,7 @@ export function buildSkillMarkdown(opts: {
 // ---------- page → skill ----------
 
 export type ConvertedPage =
-  | { ok: true; skill: SkillFile }
+  | { ok: true; skill: ConvertedSkill }
   | { ok: false; reason: string };
 
 export async function convertPageToSkill(
@@ -99,7 +108,24 @@ export async function convertPageToSkill(
   if (!description) return { ok: false, reason: `missing "Description" property` };
 
   const blocks = await fetchBlockTree(client, page.id);
-  const body = renderBlocks(blocks, 0);
+
+  // Multi-file skills: child_page blocks at the top level represent
+  // sibling files in the skill directory. Partition them out so the
+  // parent body doesn't carry their reference markers, then fetch
+  // each child's content separately. Nested child_pages (inside
+  // columns, toggles, etc.) aren't supported in v1.
+  const childPageBlocks = blocks.filter((b) => b.type === "child_page");
+  const bodyBlocks = blocks.filter((b) => b.type !== "child_page");
+  const body = renderBlocks(bodyBlocks, 0);
+
+  const files: SkillFile[] = [];
+  for (const cp of childPageBlocks) {
+    const childTitle = readChildPageTitle(cp);
+    if (!childTitle) continue;
+    const childBlocks = await fetchBlockTree(client, cp.id);
+    const childBody = renderBlocks(childBlocks, 0);
+    files.push(parseFromChildPage(childTitle, childBody));
+  }
 
   const properties = readSkillPropertiesFromPage(page, slugify(title), description);
   return {
@@ -109,8 +135,15 @@ export async function convertPageToSkill(
       body,
       pageId: page.id,
       lastEditedTime: page.last_edited_time,
+      files,
     },
   };
+}
+
+function readChildPageTitle(block: NotionBlock): string | null {
+  const inner = (block as { child_page?: { title?: string } }).child_page;
+  const t = inner?.title?.trim();
+  return t && t.length > 0 ? t : null;
 }
 
 /**

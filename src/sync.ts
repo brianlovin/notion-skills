@@ -29,6 +29,7 @@ import {
   hashBehaviorProperties,
   hashBody,
 } from "./page-hash.js";
+import { materializeFiles } from "./skill-files.js";
 import {
   collidingSlugSet,
   detectSlugCollisions,
@@ -319,6 +320,7 @@ export async function runSync(
     const skillDir = join(contentRoot, skillName);
     await mkdir(skillDir, { recursive: true });
     await writeFile(join(skillDir, "SKILL.md"), md, "utf8");
+    await materializeFiles(skillDir, skill.files);
 
     const wasNew = !oldManifest.skills[skillName];
     if (wasNew) summary.created.push(skillName);

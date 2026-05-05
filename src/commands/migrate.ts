@@ -18,6 +18,11 @@ import { findTargetByKey } from "../known-targets.js";
 import { MANIFEST_FILE, ROOT_DIR, SKILLS_STORE } from "../paths.js";
 import { readManifest } from "../manifest.js";
 import { runSync, printSummary } from "../sync.js";
+import {
+  readLocalSkillFiles,
+  renderForChildPage,
+  type SkillFile,
+} from "../skill-files.js";
 import { startTask } from "./_progress.js";
 
 interface MigrateOptions {
@@ -220,6 +225,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
       if (c.skill.body.trim()) {
         await ntnSetPageMarkdown(pageId, c.skill.body);
       }
+      await pushSkillFiles(client, pageId, c.skill.source);
       created.push({ name: c.skill.name, pageId, sources: allSources(c) });
       task.done();
     } catch (err) {
@@ -239,6 +245,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
       if (c.skill.body.trim()) {
         await ntnSetPageMarkdown(c.existingPageId, c.skill.body);
       }
+      await pushSkillFiles(client, c.existingPageId, c.skill.source);
       updated.push({
         name: c.skill.name,
         pageId: c.existingPageId,
@@ -452,6 +459,63 @@ function collectSelfHealingValues(
     }
   }
   return out;
+}
+
+/**
+ * After creating or updating a parent skill page, push every non-
+ * SKILL.md file from the source directory as a child page on that
+ * row. Existing child pages with matching titles are PATCHed in place;
+ * orphans whose title no longer matches a local file are archived
+ * (publish is the source of truth — local removed = remote removed).
+ *
+ * Unsupported files (binaries, unknown extensions) are surfaced as a
+ * yellow warning and skipped.
+ */
+async function pushSkillFiles(
+  client: NotionClient,
+  pageId: string,
+  sourceDir: string,
+): Promise<void> {
+  const files = await readLocalSkillFiles(sourceDir);
+  const unsupported = files.filter((f) => f.kind === "unsupported");
+  if (unsupported.length > 0) {
+    console.log(
+      chalk.yellow(
+        `  ⚠ skipping ${unsupported.length} unsupported ${unsupported.length === 1 ? "file" : "files"}: ${unsupported.map((f) => f.path).join(", ")}`,
+      ),
+    );
+  }
+  const supported = files.filter((f) => f.kind !== "unsupported");
+
+  const blocks = await client.getBlockChildren(pageId);
+  const existingByTitle = new Map<string, string>();
+  for (const block of blocks) {
+    if (block.type !== "child_page") continue;
+    const cp = (block as { child_page?: { title?: string } }).child_page;
+    const title = cp?.title?.trim();
+    if (title) existingByTitle.set(title, block.id);
+  }
+
+  const desiredTitles = new Set(supported.map((f) => f.path));
+
+  for (const file of supported) {
+    const body = renderForChildPage(file);
+    const existingId = existingByTitle.get(file.path);
+    if (existingId) {
+      await ntnSetPageMarkdown(existingId, body);
+    } else {
+      const newId = await client.createChildPage(pageId, file.path);
+      if (body.trim()) {
+        await ntnSetPageMarkdown(newId, body);
+      }
+    }
+  }
+
+  for (const [title, id] of existingByTitle) {
+    if (!desiredTitles.has(title)) {
+      await client.archivePage(id);
+    }
+  }
 }
 
 function timestamp(): string {
