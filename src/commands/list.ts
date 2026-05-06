@@ -226,9 +226,11 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
   }
 
   // Pass 2: drafts — central-store dirs not represented anywhere above.
-  // Local-only drafts have source_key = null; their installed cousins
-  // appeared in pass 1 already.
-  if (existsSync(contentRoot)) {
+  // Local-only drafts have source_key = null. Skipped when --source
+  // narrows the view to one source: drafts and installed-elsewhere
+  // entries don't belong in that source's frame.
+  const sourceFilterActive = !!options.source;
+  if (existsSync(contentRoot) && !sourceFilterActive) {
     const knownLocalSlugs = new Set(rows.map((r) => r.name).filter((n) => n !== "—"));
     let entries: string[];
     try {
@@ -256,9 +258,6 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
       } catch {
         // ignore
       }
-      // If a manifest entry exists for this dir but its source isn't in
-      // our query window (e.g. user filtered to one source), it counts
-      // as an installed-elsewhere row; otherwise it's a local draft.
       const manifestEntry = manifest?.skills[entry];
       rows.push({
         name: entry,
