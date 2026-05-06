@@ -4,7 +4,7 @@ All client state lives under `~/.notion-skills/`:
 
 ```
 ~/.notion-skills/
-├── scope.json                  # database_id, sync targets, exclude_skills, gen_agent
+├── scope.json                  # database_id, sync targets, gen_agent
 ├── manifest.json               # per-installed-skill sync state
 ├── skills/<slug>/              # every skill on this machine (installed + drafts)
 └── backup/                     # auto-backups from uninstall + sync-overwrite

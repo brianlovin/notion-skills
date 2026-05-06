@@ -201,7 +201,9 @@ my-skill/
 
 ## Slug stability
 
-The slug is derived from the page title. **Renaming a page in Notion is effectively a re-slug**: the old installation becomes orphaned, the renamed skill shows up as a new `available` row, and the install counter resets. Before suggesting a rename, warn the user and tell them they'll need to `uninstall <old-slug> && install <new-slug>` on every machine.
+The slug is derived from the page title, but identity is keyed by Notion's stable `page_id`. When a user renames a page in Notion, the next `list` or `sync` automatically migrates local state: central-store directory, every agent CLI's symlink, and the manifest entry all move to the new slug. Install count and drift hashes are preserved. The user sees `↪ old-slug → new-slug (renamed in Notion)`.
+
+Renames are refused if the new slug collides with another tracked skill or an existing local draft.
 
 If two pages share a title, both slugify to the same string. `sync` skips them with a warning, `install` refuses them, `doctor` flags them. Resolution: rename one of the pages in Notion.
 

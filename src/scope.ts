@@ -8,12 +8,6 @@ export interface Scope {
   database_title?: string;
   targets: string[];
   /**
-   * Optional denylist: skill slugs we should NOT sync. Defaults to syncing
-   * everything in the database. Edit the JSON file by hand to set; there's
-   * no UI for it (rare enough to not warrant a command).
-   */
-  exclude_skills?: string[];
-  /**
    * The coding-agent CLI key (claude, codex, opencode, gemini) used by
    * `notion-skills gen`. Set on first gen invocation; can be overridden
    * per-run with `--agent`.
@@ -24,18 +18,17 @@ export interface Scope {
 }
 
 /**
- * Raw on-disk shape. We accept exclude_skills either at top-level (current
- * shape) or under a legacy `filter` object (pre-v0.3) for backwards
- * compatibility on read; we always write the new shape.
+ * Raw on-disk shape. Older scope files may carry an `exclude_skills`
+ * array (or legacy `filter.exclude_skills`); we read silently and drop
+ * the field on write since explicit install/uninstall has obsoleted
+ * the denylist.
  */
 interface RawScope {
   database_id: string;
   data_source_id: string;
   database_title?: string;
   targets?: string[];
-  exclude_skills?: string[];
   gen_agent?: string;
-  filter?: { exclude_skills?: string[] };
 }
 
 /**
@@ -51,7 +44,6 @@ export async function getScope(): Promise<Scope | null> {
     data_source_id: raw.data_source_id,
     database_title: raw.database_title,
     targets: raw.targets ?? [],
-    exclude_skills: raw.exclude_skills ?? raw.filter?.exclude_skills,
     gen_agent: raw.gen_agent,
     path: SCOPE_FILE,
   };
@@ -63,7 +55,6 @@ export async function writeScope(scope: Omit<Scope, "path">): Promise<void> {
     data_source_id: scope.data_source_id,
     database_title: scope.database_title,
     targets: scope.targets,
-    exclude_skills: scope.exclude_skills,
     gen_agent: scope.gen_agent,
   };
   await writeJson(SCOPE_FILE, payload);

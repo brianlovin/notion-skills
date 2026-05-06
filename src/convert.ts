@@ -62,6 +62,11 @@ export function buildSkillMarkdown(opts: {
     const value = (opts.properties as unknown as Record<string, unknown>)[key];
 
     if (value === undefined) continue;
+    // Tags are a Notion-only filter — used by `list --tag`, `install
+    // --tag`, etc. They aren't part of the Skills spec, so they don't
+    // belong in SKILL.md frontmatter. We still read them from Notion
+    // and persist them on the row; we just don't round-trip to disk.
+    if (prop.taxonomyOnly) continue;
 
     // Skip select values that mean "use spec default"
     if (prop.kind === "select") {

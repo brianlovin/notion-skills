@@ -30,9 +30,6 @@ export async function statusCommand(): Promise<void> {
   if (scope) {
     console.log(`  database: ${scope.database_title ?? scope.database_id}`);
     console.log(`  targets:  ${scope.targets.join(", ") || chalk.dim("(none)")}`);
-    if (scope.exclude_skills && scope.exclude_skills.length > 0) {
-      console.log(`  exclude:  ${scope.exclude_skills.join(", ")}`);
-    }
 
     const manifest = await readManifest(MANIFEST_FILE);
     if (manifest) {

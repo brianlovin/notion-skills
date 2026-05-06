@@ -124,7 +124,10 @@ test("buildSkillMarkdown: emits model + effort + context + agent", () => {
   assert.match(md, /^agent: Explore/m);
 });
 
-test("buildSkillMarkdown: emits tags as a YAML list", () => {
+test("buildSkillMarkdown: tags are NOT emitted (Notion-only filter, not part of Skills spec)", () => {
+  // Tags drive `list --tag` and `install --tag` but never round-trip to
+  // disk. Skills authored locally don't carry tags in their frontmatter;
+  // tags are set on the Notion row directly.
   const md = buildSkillMarkdown({
     properties: {
       name: "x",
@@ -133,7 +136,9 @@ test("buildSkillMarkdown: emits tags as a YAML list", () => {
     },
     body: "body",
   });
-  assert.match(md, /tags:\n  - engineering\n  - productivity/);
+  assert.doesNotMatch(md, /tags:/);
+  assert.doesNotMatch(md, /engineering/);
+  assert.doesNotMatch(md, /productivity/);
 });
 
 test("buildSkillMarkdown: empty tags don't get emitted", () => {

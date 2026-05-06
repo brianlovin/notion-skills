@@ -57,7 +57,7 @@ export async function initCommand(): Promise<void> {
   // they already exist.
   if (!isFresh) {
     const { added, retyped } = await client.upgradeSchema(dataSourceId, {
-      only: new Set(["Description", "Installs"]),
+      only: new Set(["Description", "Tags", "Installs"]),
     });
     if (added.length || retyped.length) {
       const total = added.length + retyped.length;

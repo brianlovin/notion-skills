@@ -10,7 +10,6 @@ import {
   readTitle,
 } from "../notion.js";
 import { assertNtnInstalled } from "../ntn.js";
-import { shouldSyncSkill } from "../filter.js";
 import { fetchPageContent, slugify } from "../convert.js";
 import { getScope } from "../scope.js";
 import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
@@ -25,6 +24,7 @@ import {
   hashBehaviorProperties,
   hashSkillContent,
 } from "../page-hash.js";
+import { applyRenames, detectRenames } from "../renames.js";
 import { readFile } from "node:fs/promises";
 
 interface ListOptions {
@@ -43,7 +43,6 @@ interface ListOptions {
  *   - outdated:   installed but the store has a newer version
  *   - draft:      on this machine but not in the store yet (gen output, etc.)
  *   - available:  in the store but not on this machine
- *   - excluded:   in scope.exclude_skills (skipped from any sync)
  *   - invalid:    page in Notion is missing required fields (no title)
  */
 type SkillState =
@@ -51,7 +50,6 @@ type SkillState =
   | "outdated"
   | "draft"
   | "available"
-  | "excluded"
   | "invalid";
 
 interface Row {
@@ -78,13 +76,55 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
 
   const manifest = await readManifest(MANIFEST_FILE);
   const contentRoot = SKILLS_STORE;
+
+  // Apply any pending renames before computing display state. Without
+  // this step, a skill renamed in Notion would show twice in the
+  // output: once as "available" under the new slug, once as a "draft"
+  // (the stale local dir under the old slug). Mirrors the same step
+  // in sync.ts so list keeps its discovery surface consistent.
+  if (manifest) {
+    const renameOps = detectRenames(manifest, pages);
+    if (renameOps.length > 0) {
+      const outcomes = await applyRenames(
+        renameOps,
+        manifest,
+        contentRoot,
+        scope.targets,
+      );
+      for (const o of outcomes) {
+        if (o.status === "renamed") {
+          console.log(
+            chalk.cyan(
+              `↪ ${o.op.oldSlug} → ${o.op.newSlug} ${chalk.dim("(renamed in Notion)")}`,
+            ),
+          );
+        } else if (o.status === "refused") {
+          const reason =
+            o.reason.kind === "collision-manifest"
+              ? `target slug "${o.reason.conflictWith}" is already in use`
+              : `target dir "${o.reason.path}" already exists locally`;
+          console.log(
+            chalk.yellow(
+              `Refusing rename ${o.op.oldSlug} → ${o.op.newSlug}: ${reason}`,
+            ),
+          );
+        }
+      }
+      try {
+        await writeManifest(MANIFEST_FILE, manifest);
+      } catch {
+        // Cache update failure is non-fatal; sync will reconcile.
+      }
+    }
+  }
+
   const trackedNames = new Set(
     manifest ? Object.keys(manifest.skills) : [],
   );
 
   const rows: Row[] = [];
 
-  // Pass 1: rows from the Notion store (installed / outdated / available / excluded / invalid).
+  // Pass 1: rows from the Notion store (installed / outdated / available / invalid).
   for (const page of pages) {
     if (page.archived || page.in_trash) continue;
     const title = readTitle(page.properties);
@@ -104,11 +144,6 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
     const description = readRichText(page.properties, "Description");
     const tags = readMultiSelect(page.properties, "Tags");
     const installs = readNumber(page.properties, "Installs");
-
-    if (!shouldSyncSkill(name, scope.exclude_skills)) {
-      rows.push({ name, title, description, tags, installs, state: "excluded", reason: "exclude_skills" });
-      continue;
-    }
 
     const inManifest = trackedNames.has(name);
     if (!inManifest) {
@@ -251,8 +286,7 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
       outdated: 1,
       draft: 2,
       available: 3,
-      excluded: 4,
-      invalid: 5,
+      invalid: 4,
     };
     filtered.sort((a, b) => {
       if (order[a.state] !== order[b.state]) return order[a.state] - order[b.state];
@@ -352,7 +386,6 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
   if (counts.outdated) parts.push(`${counts.outdated} outdated`);
   if (counts.draft) parts.push(`${counts.draft} ${counts.draft === 1 ? "draft" : "drafts"}`);
   if (counts.available) parts.push(`${counts.available} available`);
-  if (counts.excluded) parts.push(`${counts.excluded} excluded`);
   if (counts.invalid) parts.push(`${counts.invalid} invalid`);
   console.log(chalk.dim(`  ${parts.join(" · ") || "no skills"}`));
   console.log("");
@@ -364,7 +397,6 @@ function stateMarker(state: SkillState): string {
     case "outdated": return chalk.cyan("↑");
     case "draft": return chalk.yellow("✎");
     case "available": return chalk.dim("·");
-    case "excluded": return chalk.red("✗");
     case "invalid": return chalk.yellow("!");
   }
 }

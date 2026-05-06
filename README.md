@@ -147,21 +147,6 @@ The first run prompts you to pick a coding agent (Claude, Codex, OpenCode, or Ge
 
 The agent writes the SKILL.md to `~/.notion-skills/skills/<slug>/`, exits, and `notion-skills` fans out symlinks so the new skill is invokable in your agent CLIs immediately. The skill is local-only at this point — review it, iterate, then `notion-skills publish <slug>` when you're happy. This way every "let me try this" experiment doesn't end up broadcast to your team.
 
-## Excluding skills
-
-If a published skill isn't right for your machine, just don't `install` it. To suppress a skill from `list` output entirely, add its slug to `exclude_skills` in `~/.notion-skills/scope.json`:
-
-```jsonc
-{
-  "database_id": "...",
-  "data_source_id": "...",
-  "targets": ["claude", "codex"],
-  "exclude_skills": ["broken-skill"]
-}
-```
-
-There's no command for this — denylists are rare enough that hand-editing is the right knob.
-
 ## File layout
 
 ```
@@ -265,7 +250,15 @@ my-skill/
 
 ## Renaming a skill in Notion
 
-The slug is derived from the page title. **Renaming a page in Notion changes its slug**, which means: the previous installation becomes orphaned (still on disk under the old slug, no longer matches any page), the renamed skill shows up as `available` under the new slug, and the install count resets to zero. If you rename, expect to `uninstall <old-slug>` and `install <new-slug>` on every machine.
+The slug is derived from the page title, but identity is keyed by Notion's stable `page_id`. When you rename a page in Notion, the next `list` or `sync` detects the title change, **renames the central-store directory + every target's symlink, and moves the manifest entry to the new slug** — install count, drift hashes, and per-machine state are preserved.
+
+Output looks like:
+
+```
+↪ old-slug → new-slug (renamed in Notion)
+```
+
+Renames are refused (with a warning) if the target slug is already in use by another skill or by an existing local draft.
 
 If two pages share a title, both slugify to the same string. Sync skips them with a warning, `install` refuses them with an error listing the conflicting titles, and `doctor` flags them. Resolve by renaming one of the pages.
 

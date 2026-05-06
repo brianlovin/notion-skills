@@ -194,14 +194,20 @@ export class NotionClient {
 
     const titleProp = SCHEMA.find((p) => p.kind === "title")!;
     const descriptionProp = SCHEMA.find((p) => p.notionName === "Description")!;
+    const tagsProp = SCHEMA.find((p) => p.notionName === "Tags")!;
     const installsProp = SCHEMA.find((p) => p.notionName === "Installs")!;
     const body = {
       parent,
       title: [{ type: "text", text: { content: opts.title } }],
       initial_data_source: {
+        // Eager properties: Name + Description (skill spec) + Tags (Notion-only
+        // discovery filter, never round-tripped to SKILL.md so it won't be
+        // created on demand) + Installs (store metric). Everything else is
+        // added progressively by `publish`.
         properties: {
           [titleProp.notionName]: { title: {} },
           [descriptionProp.notionName]: propertyDefinitionPayload(descriptionProp),
+          [tagsProp.notionName]: propertyDefinitionPayload(tagsProp),
           [installsProp.notionName]: propertyDefinitionPayload(installsProp),
         },
       },

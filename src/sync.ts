@@ -10,7 +10,6 @@ import {
   readTitle,
 } from "./notion.js";
 import { assertNtnInstalled } from "./ntn.js";
-import { shouldSyncSkill } from "./filter.js";
 import {
   buildSkillMarkdown,
   convertPageToSkill,
@@ -34,6 +33,7 @@ import {
   collidingSlugSet,
   detectSlugCollisions,
 } from "./slug-collisions.js";
+import { applyRenames, detectRenames } from "./renames.js";
 import {
   ensureSymlink,
   removeSymlink,
@@ -147,23 +147,6 @@ export async function runSync(
     );
   }
 
-  // App-store rule: sync only operates on skills the user has installed
-  // (i.e. has a manifest entry). New pages in Notion appear in `list`
-  // and have to be explicitly `install`-ed.
-  //
-  // Caller exception: `extraFetchIds` lets publish-style flows include
-  // a page that was JUST uploaded (and therefore not in the manifest
-  // yet) in the pull phase, so we round-trip through Notion's
-  // normalisation and create the manifest entry for it.
-  const trackedNames = new Set(
-    Object.keys((await readManifest(MANIFEST_FILE))?.skills ?? {}),
-  );
-  const extraFetchIds = options.extraFetchIds ?? new Set<string>();
-  const kept = summaries
-    .filter((s) => !colliding.has(s.name))
-    .filter((s) => shouldSyncSkill(s.name, scope.exclude_skills))
-    .filter((s) => trackedNames.has(s.name) || extraFetchIds.has(s.id));
-
   // Load manifest, but only honour it if it belongs to the current DB.
   // Otherwise treat as fresh: we don't want a manifest from a previous
   // database to drive deletions against locals OR fake push-drift.
@@ -183,6 +166,55 @@ export async function runSync(
     onDiskManifest && !dbChanged
       ? onDiskManifest
       : emptyManifest(scope.database_id, scope.data_source_id);
+
+  // Apply renames before computing the diff: stable page_id is the
+  // ground truth, so a title change in Notion translates to a renamed
+  // local directory + symlinks + manifest entry. Without this step
+  // the renamed skill would slip out of `trackedNames` (its old slug
+  // doesn't match the new slug) and sync would treat it as a brand
+  // new "available" page plus a stale "draft" on disk.
+  const renameOps = detectRenames(oldManifest, pages);
+  const renameOutcomes = renameOps.length
+    ? await applyRenames(renameOps, oldManifest, contentRoot, scope.targets)
+    : [];
+  for (const o of renameOutcomes) {
+    if (o.status === "renamed") {
+      log(
+        chalk.cyan(
+          `↪ ${o.op.oldSlug} → ${o.op.newSlug} ${chalk.dim("(renamed in Notion)")}`,
+        ),
+      );
+    } else if (o.status === "refused") {
+      const reason =
+        o.reason.kind === "collision-manifest"
+          ? `target slug "${o.reason.conflictWith}" is already in use`
+          : `target dir "${o.reason.path}" already exists locally`;
+      warn(
+        chalk.yellow(
+          `Refusing rename ${o.op.oldSlug} → ${o.op.newSlug}: ${reason}`,
+        ),
+      );
+    }
+  }
+
+  // App-store rule: sync only operates on skills the user has installed
+  // (i.e. has a manifest entry). New pages in Notion appear in `list`
+  // and have to be explicitly `install`-ed.
+  //
+  // Caller exception: `extraFetchIds` lets publish-style flows include
+  // a page that was JUST uploaded (and therefore not in the manifest
+  // yet) in the pull phase, so we round-trip through Notion's
+  // normalisation and create the manifest entry for it.
+  const trackedNames = new Set(Object.keys(oldManifest.skills));
+  const extraFetchIds = options.extraFetchIds ?? new Set<string>();
+  // Renamed pages need to be refetched so the SKILL.md frontmatter
+  // (which encodes the new slug as `name:`) gets rewritten on disk.
+  for (const o of renameOutcomes) {
+    if (o.status === "renamed") extraFetchIds.add(o.op.pageId);
+  }
+  const kept = summaries
+    .filter((s) => !colliding.has(s.name))
+    .filter((s) => trackedNames.has(s.name) || extraFetchIds.has(s.id));
 
   const diff = diffManifest(
     oldManifest,
