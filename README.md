@@ -1,24 +1,24 @@
 # notion-skills
 
-> A skill store for your AI coding agents. Author once in Notion, install only what you need, share with your team.
+> A skill store for your AI coding agents. Create and collaborate on your skills in Notion, then install specific skills to your computer or connect to your agents with the Notion MCP.
 
 [![npm](https://img.shields.io/npm/v/@brianlovin/notion-skills.svg?cacheSeconds=300)](https://www.npmjs.com/package/@brianlovin/notion-skills)
 
 ## Why notion-skills?
 
-AI coding agents (Claude Code, Codex, OpenCode, Cursor, Gemini) all read **skills** — small `SKILL.md` files that tell the agent what to do and when to do it. The format is shared across agents, but each one reads from its own folder, and authoring skills means tending markdown files in git.
+AI coding agents (Claude Code, Codex, OpenCode, Cursor, Gemini) all read [**skills**](https://agentskills.io/home) — small `SKILL.md` files that tell the agent what to do and when to do it. The format is shared across agents, but each one reads from its own folder. Authoring skills usually requires tending markdown files in git to keep them synced across computers, projects, and team members.
 
 `notion-skills` flips that: skills live as rows in a Notion database — your **workspace skill store** — and you `install` only the ones you want on each machine.
 
-- 🏪 **Browse a store, install what you need.** Don't sync everything; pick the skills that fit your workflow. Tags drive discovery.
-- ✏️ **Edit in Notion's UI.** Title is the skill name, properties become frontmatter, page body is the SKILL.md content. No editor, no git, no PR review.
-- 👥 **Share with a team.** Point teammates at the same store. They install what's relevant to them; you publish what's worth sharing.
-- 🤖 **Generate skills via your coding agent.** `notion-skills gen <url|path|prompt>` hands off to Claude / Codex / OpenCode / Gemini, which writes a skill from your input as a local-first draft you can review and publish.
+- 🏪 **Browse your team's skill store.** Don't sync everything; pick the skills that fit your workflow.
+- ✏️ **Edit in Notion.** Use Notion's rich text editor to collaboratively draft and and publish skills for you and your team.
+- 👥 **Share with a team.** Point teammates at the shared skill store so they can install the skills most relevant to their workflows.
+- 🤖 **Generate skills via your coding agent.** `notion-skills gen <url|path|prompt>` hands off to Claude / Codex / OpenCode / Gemini, which writes a skill from as a local-first draft you can review and publish.
 - 🎯 **One source, many agents.** Skills land as symlinks, so every agent CLI on your machine sees the same set with one command.
 
 ## Requirements
 
-- macOS or Linux. Windows isn't supported yet (symlinks).
+- macOS or Linux.
 - Node.js 18+.
 - [`ntn`](https://github.com/makenotion/cli) 0.12+, logged in. `notion-skills` uses it for every Notion API call — no separate OAuth, no integration to register.
 
@@ -39,51 +39,31 @@ npm install -g @brianlovin/notion-skills
 notion-skills init
 ```
 
-The wizard:
+The wizard will guide you through:
 
-1. **Database** — create a new skill store, or link an existing one.
-2. **Targets** — auto-checks every agent CLI installed on your machine (Claude, Codex, OpenCode, Cursor, Gemini, plus the generic `~/.agents/` catch-all).
-3. **Import** — if you have skills already on disk, optionally bring them into the store.
+1. **Database setup** — create a new skill store, or link an existing one.
+2. **AI agent targets** — auto-checks every agent CLI installed on your machine (Claude, Codex, OpenCode, Cursor, Gemini, plus the generic `~/.agents/` catch-all).
+3. **Import** — if you have skills already on disk, optionally publish them to the store.
 
 Then:
 
 ```bash
 notion-skills list                  # browse the store
-notion-skills list --sort installs  # sort by install count (most popular first)
+notion-skills list --sort popular   # sort by install count (most popular first)
 notion-skills install <slug>        # install one
 notion-skills install --tag featured  # install all skills tagged "featured"
 notion-skills install --all         # install everything (power-user)
 ```
 
-Type `/skill-name` in any agent CLI to use them.
-
-## What's a skill?
-
-A directory with a `SKILL.md` file. Frontmatter tells the agent when to use the skill; body is the content the agent reads.
-
-```markdown
----
-name: deslop
-description: Remove AI-generated code slop from the current branch.
-tags:
-  - refactoring
----
-
-Check the diff against main and remove unnecessary comments,
-defensive checks, and inconsistent style introduced in this branch.
-```
-
-In Notion that's a row with the title `deslop`, a `Description` property, optional `Tags`, and the body in the page itself. `notion-skills install deslop` reads that row, writes a `SKILL.md` to `~/.notion-skills/skills/deslop/`, and symlinks it into every agent dir you've configured.
-
 ## Lifecycle
 
-The mental model is an app store. Skills move between three states:
+`notion-skills` turns your team's skill files into an app store. Skills move between three states:
 
-- **In the store** (a Notion page with `Published = true`) — ready for your team to install.
+- **In the store** (a Notion page) — ready for your team to install.
 - **Installed** (on your machine) — invokable by your agent CLIs.
 - **Drafted** — either local-only (no Notion row yet) or in Notion with `Published = false`. Either way: not yet ready for the team. See [Drafts](#drafts).
 
-Verbs:
+**Verbs:**
 
 | Action | Verb |
 |---|---|
@@ -97,14 +77,14 @@ Verbs:
 | Retire from the store entirely | `unpublish <slug>` |
 | Bulk-import pre-existing local skills | `import [--from <path>]` |
 
-A skill you have edited locally won't push automatically — `sync` is pull-only. When you're ready to share your edits, run `publish <slug>`.
+A skill you have edited locally won't push automatically — `notion-skills sync` is pull-only. When you're ready to share your edits, run `notion-skills publish <slug>`.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `init` | Connect to (or create) your workspace skill store. |
-| `list` | Browse what's in the store with state markers (installed, available, outdated, draft). The `↓` next to a row shows its install count. Supports `--installed`, `--available`, `--outdated`, `--drafts`, `--tag <name>`, `--sort installs` (popular first), `--json`. |
+| `list` | Browse what's in the store with state markers (installed, available, outdated, draft). The Installs column shows the install count. Supports `--installed`, `--available`, `--outdated`, `--drafts`, `--tag <name>`, `--sort popular` (by install count), `--json`. |
 | `install <slug>` / `--tag` / `--all` | Pull a skill from the store onto this machine. |
 | `uninstall <slug>` | Remove a skill from this machine (Notion page is untouched). Auto-backs up local edits. |
 | `gen <input>` | Generate a new skill from a URL, file path, or prompt. The agent writes a local-first draft; review and `publish` when ready. |
@@ -198,40 +178,6 @@ cp ~/.notion-skills/backup/uninstall-<ts>/<slug>/SKILL.md \
 notion-skills publish <slug>   # if you want it back in the store
 ```
 
-## Schema reference
-
-`init` creates the store with `Name` + `Description` + `Tags` + `Installs` + `Published`, plus four default views (**All**, **Popular** by install count, **New**, **Drafts** for `Published=false` rows). Each view shows just `Name / Description / Tags / Installs` by default; everything else is hidden but toggleable per-view in Notion. Optional spec columns are added progressively by `publish` when a skill uses them — most skills never need anything beyond Name + Description + Tags.
-
-| Property | Frontmatter key | Type |
-|---|---|---|
-| `Name` | `name` (slug from title) | title |
-| `Description` | `description` | rich_text |
-| `Tags` | `tags` | multi_select (self-healing) |
-| `When To Use` | `when_to_use` | rich_text |
-| `Argument Hint` | `argument-hint` | rich_text |
-| `Arguments` | `arguments` | rich_text (space-sep) |
-| `Allowed Tools` | `allowed-tools` | rich_text (space-sep, paren-aware) |
-| `Paths` | `paths` | rich_text (comma-sep) |
-| `Disable Model Invocation` | `disable-model-invocation` | select |
-| `User Invocable` | `user-invocable` | select |
-| `Model` | `model` | select (self-healing) |
-| `Effort` | `effort` | select |
-| `Context` | `context` | select |
-| `Agent` | `agent` | select (self-healing) |
-| `Shell` | `shell` | select |
-| `Installs` | — (not round-tripped) | number |
-| `Published` | — (not round-tripped) | checkbox |
-
-**Self-healing selects/multi-selects** (`Tags`, `Model`, `Agent`) auto-add new options on publish, so any tag or model name the user types becomes a real Notion option without an upgrade step.
-
-**Defaults** (`disable-model-invocation: false`, `user-invocable: true`, `shell: bash`) are omitted from frontmatter when syncing back to disk.
-
-**`Installs`** is a store-managed counter — incremented +1 by `notion-skills install`. It exists in Notion (so `list --sort installs` and the **Popular** view can rank by it) but never round-trips into SKILL.md frontmatter, so editing it doesn't mark a skill outdated.
-
-**`Tags`** are taxonomy-only: editing them in Notion never marks a skill outdated either, since they don't change how the model executes the skill.
-
-**`Published`** is the draft / ready gate. See [Drafts](#drafts) — also never round-tripped, so flipping it doesn't trigger drift.
-
 ## Drafts
 
 A skill is either **ready** or a **draft**. Drafts are skills that aren't ready for team consumption yet — either because they're local-only (gen output, hand-authored, not yet pushed) or because they exist in Notion but the `Published` checkbox is unchecked. Both kinds appear with the `✎` marker in `list`.
@@ -290,15 +236,6 @@ Output looks like:
 Renames are refused (with a warning) if the target slug is already in use by another skill or by an existing local draft.
 
 If two pages share a title, both slugify to the same string. Sync skips them with a warning, `install` refuses them with an error listing the conflicting titles, and `doctor` flags them. Resolve by renaming one of the pages.
-
-## Limitations
-
-- **macOS and Linux only.** Windows symlink support is on the list.
-- **Round-trip normalisation.** Notion's markdown parser tweaks some content on ingest — long YAML descriptions wrap, multi-line paragraphs split into blocks, code-language aliases expand (`ts` → `typescript`), bare domains autolink. After `publish`, the round-trip writes Notion's normalised version back to disk; expect minor reformatting.
-- **Per-machine install state.** Skills you install on your work laptop don't auto-appear on your home laptop. `install --all` mirrors a fresh machine; richer cross-machine sync is on the v2 list.
-- **Anyone can edit any installed skill.** Edits stay local until `publish`. Page-level Notion permissions are the eventual access-control story.
-- **Slug stability.** Slugs are derived from titles; renaming a Notion page is effectively a re-slug. See [Renaming a skill in Notion](#renaming-a-skill-in-notion).
-- **Performance.** Each API call shells out to `ntn` (~50–100 ms).
 
 ## Contributing
 

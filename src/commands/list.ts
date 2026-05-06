@@ -34,7 +34,9 @@ interface ListOptions {
   outdated?: boolean;
   drafts?: boolean;
   tag?: string[];
-  sort?: "name" | "installs";
+  // `popular` is the canonical form (matches the Notion "Popular" view).
+  // `installs` is kept as an alias for muscle memory + back-compat.
+  sort?: "name" | "popular" | "installs";
   json?: boolean;
 }
 
@@ -296,7 +298,7 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
     return true;
   });
 
-  if (options.sort === "installs") {
+  if (options.sort === "popular" || options.sort === "installs") {
     // Sorted by install count, descending — surface popular skills first.
     // Within the same count, alphabetical.
     filtered.sort((a, b) => {
