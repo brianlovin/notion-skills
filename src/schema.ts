@@ -41,7 +41,8 @@ export type PropertyKind =
   | "number"
   | "select"
   | "multi_select"
-  | "list_text";
+  | "list_text"
+  | "created_time";
 
 /**
  * Where this property comes from in the broader skills ecosystem.
@@ -301,6 +302,22 @@ export const SCHEMA: PropertyDef[] = [
     description: "Install count. Auto-incremented by `notion-skills install`.",
   },
   {
+    // Page creation timestamp. Notion auto-fills this on every page;
+    // metric-only so it never round-trips into SKILL.md. Hidden from
+    // default views (the "New" view sorts by it but column visibility
+    // is independent of sort). Why a real column instead of the
+    // built-in `timestamp: created_time` view sort: Notion's POST
+    // /v1/views silently drops the meta-timestamp shape, so the New
+    // view never actually sorted by created date. Sorting by a
+    // property-name we created ourselves is the reliable path.
+    notionName: "Created",
+    frontmatterKey: "created",
+    kind: "created_time",
+    tier: "notion",
+    metricOnly: true,
+    description: "Auto-populated by Notion on page creation. Drives the \"New\" view sort.",
+  },
+  {
     // Draft / ready gate. Unchecked = draft (hidden from `--available`,
     // skipped by bulk install, sorted last in `list`). The act of
     // running `notion-skills publish` checks this; `unpublish` archives
@@ -396,12 +413,13 @@ export function buildViewConfiguration(
     }
   }
   // Visible columns first (so they sort in SCHEMA order at the left),
-  // then the hidden ones. Frozen column index counts visible columns
-  // from the start: Name + Description = 2 frozen.
+  // then the hidden ones. `frozen_column_index` is the 0-based index of
+  // the last frozen column (inclusive per Notion's API): index 1 freezes
+  // through Description, leaving Tags + Installs scrollable.
   return {
     type: "table",
     properties: [...visible, ...hidden],
-    frozen_column_index: 2,
+    frozen_column_index: 1,
   };
 }
 

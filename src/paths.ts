@@ -5,6 +5,8 @@ export const HOME = homedir();
 export const ROOT_DIR = join(HOME, ".notion-skills");
 export const SCOPE_FILE = join(ROOT_DIR, "scope.json");
 export const MANIFEST_FILE = join(ROOT_DIR, "manifest.json");
+export const LOGS_DIR = join(ROOT_DIR, "logs");
+export const NTN_ERROR_LOG = join(LOGS_DIR, "ntn-errors.log");
 /**
  * The one and only place skills live on disk. Skills synced from Notion
  * land here; skills authored locally (by `gen` or by hand) are written

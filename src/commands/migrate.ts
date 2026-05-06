@@ -33,8 +33,8 @@ interface MigrateOptions {
   /**
    * Restrict the migration to these slugs. Skills not in the set are
    * silently dropped (managed/invalid are also dropped). Used by `init`
-   * and `sync` after they've shown a multiselect picker; the user has
-   * already curated the list, so don't re-litigate it here.
+   * after its multiselect picker has curated the list; don't re-
+   * litigate it here.
    */
   only?: string[];
 }

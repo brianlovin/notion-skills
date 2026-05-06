@@ -1,12 +1,22 @@
 ---
 name: notion-skills-usage
-description: Use the notion-skills CLI to manage AI agent skills from a Notion-backed workspace store. Invoke when the user wants to install a skill from their team's store, publish a local skill they authored, sync installed skills, generate a new skill via their coding agent, or inspect the state of installed/available/outdated/draft skills.
-metadata:
-  sources:
-    - README.md
-    - CLAUDE.md
-    - .claude/rules/state.md
-    - .claude/rules/drift.md
+description: >
+  Use the notion-skills CLI to manage AI agent skills from a Notion-backed
+  workspace store. Invoke when the user wants to install a skill from their
+  team's store, publish a local skill they authored, sync installed skills,
+  generate a new skill via their coding agent, or inspect the state of
+  installed/available/outdated/draft skills. Triggers on commands like
+  install, publish, sync, gen, list, uninstall, unpublish, doctor, init,
+  upgrade, open, import.
+type: core
+library: notion-skills
+library_version: "0.10.1"
+sources:
+  - README.md
+  - CLAUDE.md
+  - .claude/rules/state.md
+  - .claude/rules/drift.md
+  - .claude/rules/gotchas.md
 ---
 
 # Using notion-skills
@@ -117,7 +127,15 @@ notion-skills publish slug-a slug-b      # several
 notion-skills publish --all              # every drafted-or-locally-edited skill
 ```
 
-`--all` is the convenient way to publish everything that diverges from the store: drafts (no manifest entry yet) get created as new pages; installed-with-local-edits get PATCHed onto their existing page. After publish, the local SKILL.md is rewritten with Notion's normalised version (round-trip).
+`publish` always sets `Published = true` and resolves to one of three paths:
+
+| State | What `publish <slug>` does |
+|---|---|
+| Local draft (no Notion row) | Creates the Notion page |
+| Installed (manifest entry exists) | Updates body + properties |
+| Notion-side draft (page exists, no local presence) | Flips `Published = true`. No body upload. |
+
+`--all` publishes everything that diverges from the store. After publish, the local SKILL.md is rewritten with Notion's normalised version (round-trip).
 
 ### Uninstall
 
@@ -209,22 +227,9 @@ Round-trip rules:
 
 ## Drafts
 
-A skill is either **ready** or a **draft**. Both kinds show the `✎` marker in `list`. Two ways a skill can be a draft:
-
-- **Local-only**: skill dir exists at `~/.notion-skills/skills/<slug>/` but no Notion row yet (gen output, hand-authored).
-- **Notion-side**: row exists in Notion but its `Published` checkbox is unchecked.
-
-`publish` always sets `Published = true`. Three paths it handles:
-
-| State the user is in | What `publish <slug>` does |
-|---|---|
-| Local draft (no Notion row) | Creates the Notion page with `Published = true` |
-| Installed (manifest entry exists) | Updates the page body / properties **and** sets `Published = true` |
-| Notion-side draft (page exists, no local presence) | Flips `Published = true`. No body upload. |
-
 `install --all` and `install --tag` skip drafts. `install <slug>` works regardless of state — if a user typed the slug, they want it.
 
-When the data source doesn't have a `Published` column, every row is treated as ready. Suggest the user run `notion-skills upgrade` (or add the column manually) to opt in to drafts.
+If the data source has no `Published` column, every row is treated as ready. Suggest `notion-skills upgrade` (or adding the column in Notion) to opt in to drafts.
 
 ## Slug stability
 

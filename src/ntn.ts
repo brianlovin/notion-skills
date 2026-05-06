@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { LOGS_DIR, NTN_ERROR_LOG } from "./paths.js";
 
 export class NtnNotInstalledError extends Error {
   constructor() {
@@ -60,7 +62,11 @@ async function spawnNtn(args: string[], stdin?: string): Promise<SpawnResult> {
     });
 
     child.on("close", (code) => {
-      resolve({ stdout, stderr, code: code ?? 0 });
+      const result = { stdout, stderr, code: code ?? 0 };
+      if (result.code !== 0) {
+        logNtnFailure(args, stdin, result);
+      }
+      resolve(result);
     });
 
     if (stdin !== undefined) {
@@ -68,6 +74,35 @@ async function spawnNtn(args: string[], stdin?: string): Promise<SpawnResult> {
     }
     child.stdin.end();
   });
+}
+
+/**
+ * Append a JSONL record to ~/.notion-skills/logs/ntn-errors.log on every
+ * non-zero ntn exit. Captures argv, stdin shape, exit code, full stderr
+ * — enough postmortem signal that "what was the actual command?" is
+ * recoverable after the terminal scrolls. Truncates large fields to
+ * keep the log readable; the user can re-run with NOTION_SKILLS_DEBUG=1
+ * for live verbose output.
+ */
+function logNtnFailure(
+  args: string[],
+  stdin: string | undefined,
+  result: SpawnResult,
+): void {
+  try {
+    mkdirSync(LOGS_DIR, { recursive: true });
+    const entry = {
+      ts: new Date().toISOString(),
+      argv: args.map((a) => (a.length > 500 ? a.slice(0, 500) + `…(+${a.length - 500} chars)` : a)),
+      stdin_bytes: stdin === undefined ? null : stdin.length,
+      exit: result.code,
+      stderr: result.stderr.length > 4000 ? result.stderr.slice(0, 4000) + "…(truncated)" : result.stderr,
+    };
+    appendFileSync(NTN_ERROR_LOG, JSON.stringify(entry) + "\n");
+  } catch {
+    // Logging is best-effort. A read-only home dir or full disk
+    // shouldn't turn a recoverable ntn error into an unrelated crash.
+  }
 }
 
 /**
@@ -115,7 +150,7 @@ export async function ntnApi<T = unknown>(
     }
 
     lastErr = new NtnApiError(
-      `ntn api ${method} ${path} failed (exit ${result.code}): ${result.stderr.trim() || result.stdout.trim()}`,
+      `ntn api ${method} ${path} failed (exit ${result.code}): ${result.stderr.trim() || result.stdout.trim()}\n  full argv + stderr: ${NTN_ERROR_LOG}`,
       result.code,
       result.stderr,
     );
@@ -207,17 +242,23 @@ export async function ntnVersion(): Promise<string | null> {
  * Replace a page's content with markdown. ntn does the markdown → blocks
  * conversion server-side. Used by `migrate` to push a local SKILL.md body
  * into a freshly-created Notion page.
+ *
+ * The markdown is glued onto `--content=` as a single argv token rather
+ * than passed as a separate value. ntn is built on Rust's clap, which
+ * rejects flag values that start with `-` ("unexpected argument '- '")
+ * unless they're attached with `=`. This bites multi-file skills whose
+ * sibling files lead with a markdown bullet (`- item`).
  */
 export async function ntnSetPageMarkdown(pageId: string, markdown: string): Promise<void> {
   const result = await spawnNtn(
-    ["pages", "update", pageId, "--content", markdown, "--allow-deleting-content"],
+    ["pages", "update", pageId, `--content=${markdown}`, "--allow-deleting-content"],
   );
   if (result.code === 4 || /API token is invalid/i.test(result.stderr)) {
     throw new NtnAuthError();
   }
   if (result.code !== 0) {
     throw new NtnApiError(
-      `ntn pages update ${pageId} failed (exit ${result.code}): ${result.stderr.trim() || result.stdout.trim()}`,
+      `ntn pages update ${pageId} failed (exit ${result.code}): ${result.stderr.trim() || result.stdout.trim()}\n  full argv + stderr: ${NTN_ERROR_LOG}`,
       result.code,
       result.stderr,
     );

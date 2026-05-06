@@ -8,8 +8,9 @@ import type { ParsedSkill } from "../migrate.js";
  * source directory. Returns the slugs the user kept (empty array if
  * they deselected everything).
  *
- * Used by both `init` and `sync` after they discover skills on disk
- * that aren't represented in the configured database.
+ * Used by `init` after it discovers skills on disk that aren't
+ * represented in the configured database. `import` skips this picker
+ * and confirms in bulk; `sync` is pull-only and never uploads.
  */
 export async function pickLocalSkillsToUpload(
   skills: ParsedSkill[],

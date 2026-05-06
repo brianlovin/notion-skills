@@ -1,12 +1,12 @@
 # notion-skills
 
-> A skill store for your AI coding agents. Create and collaborate on skills in Notion, then install them on your computer or connect to your agents through the Notion MCP.
+> A skill store for your AI coding agents. Create and collaborate on skills in Notion, then install them on your computer.
 
 [![npm](https://img.shields.io/npm/v/@brianlovin/notion-skills.svg?cacheSeconds=300)](https://www.npmjs.com/package/@brianlovin/notion-skills)
 
 ## Why
 
-AI coding agents (Claude Code, Codex, OpenCode, Cursor, Gemini) all read [skills](https://agentskills.io/home) — small `SKILL.md` files that tell an agent what to do and when. The format is shared across agents, but each one reads from its own folder, and authoring usually means tending markdown files in git to keep them synced across machines and teammates.
+AI coding agents (Claude Code, Codex, OpenCode, Cursor, Gemini) all read [skills](https://agentskills.io/home) — small `SKILL.md` files that tell an agent what to do and when. The format is shared, but each agent reads from its own folder, and authoring usually means tending markdown files in git to keep them synced across machines and teammates.
 
 `notion-skills` puts your skills in a Notion database. You browse a shared store, install only what you want on each machine, and edit skills the way you edit any other Notion page.
 

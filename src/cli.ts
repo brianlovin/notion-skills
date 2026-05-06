@@ -135,7 +135,7 @@ program
 
 program
   .command("import")
-  .description("Bulk-import pre-existing local skills into the store (interactive multiselect)")
+  .description("Bulk-import pre-existing local skills into the store")
   .option("--from <path...>", "extra directories to scan, e.g. an old skills repo")
   .option("-y, --yes", "skip the confirmation prompt")
   .action(importCommand);

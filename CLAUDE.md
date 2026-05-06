@@ -14,7 +14,8 @@ App-store-style CLI for AI coding agent skills. A Notion database is the workspa
 After making changes:
 
 - `npm test` — runs `tsc` then `node --test test/*.test.mjs`.
-- For CLI/UX changes, exercise via `node dist/cli.js <subcommand>` against the live Notion store. `npm link` is set up so `notion-skills` resolves to the local build.
+- For CLI/UX changes, exercise via `notion-skills <subcommand>` against the live Notion store (`npm link` resolves it to the local build).
+- If you edit `skills/notion-skills-usage/SKILL.md`, run `npx intent validate` — it runs in `prepublishOnly` and gates publish.
 
 When fixing a bug, prefer "extract pure helper, write regression test, fix" over patching the orchestrator in place.
 

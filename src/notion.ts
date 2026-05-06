@@ -261,10 +261,15 @@ export class NotionClient {
     }
     const dataSourceId = created.data_sources[0]!.id;
 
-    // Scaffold the All / Popular / New default views. Fail-soft: a
-    // missing Views API or a stricter workspace shouldn't stop the user
-    // from getting a working database.
-    await this.ensureDefaultViews(created.id, dataSourceId);
+    // Scaffold the All / Popular / New / Drafts default views. Fail-soft:
+    // a missing Views API or a stricter workspace shouldn't stop the user
+    // from getting a working database. `deleteUnmanagedViews` removes
+    // the auto-created default view that Notion adds on database
+    // creation — safe here because no user has had a chance to add
+    // their own views yet.
+    await this.ensureDefaultViews(created.id, dataSourceId, {
+      deleteUnmanagedViews: true,
+    });
 
     return {
       id: created.id,
@@ -297,6 +302,7 @@ export class NotionClient {
   async ensureDefaultViews(
     databaseId: string,
     dataSourceId: string,
+    options: { deleteUnmanagedViews?: boolean } = {},
   ): Promise<void> {
     try {
       const dataSource = await this.getDataSource(dataSourceId);
@@ -346,17 +352,23 @@ export class NotionClient {
           skipIf: () => !propertiesByName["Installs"]?.id,
         },
         {
+          // Sort by the `Created` property (created_time kind) rather
+          // than the meta-timestamp shape, which POST /v1/views silently
+          // drops.
           name: "New",
-          sorts: [{ timestamp: "created_time", direction: "descending" }],
+          sorts: [{ property: "Created", direction: "descending" }],
+          skipIf: () => !propertiesByName["Created"]?.id,
         },
         {
           name: "Drafts",
-          sorts: [{ timestamp: "created_time", direction: "descending" }],
+          sorts: [{ property: "Created", direction: "descending" }],
           filter: {
             property: "Published",
             checkbox: { equals: false },
           },
-          skipIf: () => !propertiesByName["Published"]?.id,
+          skipIf: () =>
+            !propertiesByName["Created"]?.id ||
+            !propertiesByName["Published"]?.id,
         },
       ];
 
@@ -393,6 +405,32 @@ export class NotionClient {
           // One view's failure shouldn't block the others.
           if (process.env.NOTION_SKILLS_DEBUG === "1") {
             console.error(`view "${view.name}" failed:`, err);
+          }
+        }
+      }
+
+      // Optional cleanup: remove views that aren't in our managed set.
+      // Only safe right after database creation, where the only
+      // unmanaged view is the auto-created default. Re-listing picks
+      // up the views we just created so we don't accidentally delete
+      // them.
+      if (options.deleteUnmanagedViews) {
+        const managedNames = new Set(desired.map((v) => v.name));
+        const refreshed = await this.request<{
+          results?: Array<{ id: string }>;
+        }>("GET", `/v1/views?${search.toString()}`);
+        for (const v of refreshed.results ?? []) {
+          try {
+            const detail = await this.request<{ id: string; name?: string }>(
+              "GET",
+              `/v1/views/${v.id}`,
+            );
+            if (detail.name && managedNames.has(detail.name)) continue;
+            await this.request("DELETE", `/v1/views/${v.id}`);
+          } catch (err) {
+            if (process.env.NOTION_SKILLS_DEBUG === "1") {
+              console.error(`view delete ${v.id} failed:`, err);
+            }
           }
         }
       }
@@ -830,6 +868,7 @@ function expectedNotionType(kind: PropertyDef["kind"]): string {
     case "number": return "number";
     case "select": return "select";
     case "multi_select": return "multi_select";
+    case "created_time": return "created_time";
   }
 }
 
@@ -856,5 +895,7 @@ export function propertyDefinitionPayload(prop: PropertyDef): unknown {
       return {
         multi_select: { options: prop.options ?? [] },
       };
+    case "created_time":
+      return { created_time: {} };
   }
 }

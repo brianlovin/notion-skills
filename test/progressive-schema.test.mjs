@@ -202,13 +202,15 @@ test("notionPropsForSkill: metric-only props (Installs) never trigger column cre
 // "high-signal" columns (Name / Description / Tags / Installs) come
 // first with visible: true; everything else is included with
 // visible: false so users can flip them on per-view if they want.
-// Name + Description are frozen (frozen_column_index: 2).
+// Name + Description are frozen. `frozen_column_index` is the 0-based
+// index of the last frozen column (inclusive per Notion's API), so 1
+// freezes through Description and leaves Tags + Installs scrollable.
 
 test("buildViewConfiguration: empty data source → empty properties", () => {
   const config = buildViewConfiguration({});
   assert.equal(config.type, "table");
   assert.deepEqual(config.properties, []);
-  assert.equal(config.frozen_column_index, 2);
+  assert.equal(config.frozen_column_index, 1);
 });
 
 test("buildViewConfiguration: only Name + Description present (both visible-by-default)", () => {
@@ -220,7 +222,7 @@ test("buildViewConfiguration: only Name + Description present (both visible-by-d
     { property_id: "title-id", visible: true },
     { property_id: "desc-id", visible: true },
   ]);
-  assert.equal(config.frozen_column_index, 2);
+  assert.equal(config.frozen_column_index, 1);
 });
 
 test("buildViewConfiguration: visible-by-default columns first, others hidden", () => {
