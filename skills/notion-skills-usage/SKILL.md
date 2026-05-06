@@ -15,16 +15,16 @@ metadata:
 
 ## Mental model
 
-A skill on the user's machine is in one of three states:
+A skill is in one of three states:
 
 - **Installed** — has a manifest entry. Invokable via the agent CLI's `/<slug>` shortcut.
-- **Draft** — exists in the central store at `~/.notion-skills/skills/<slug>/` but has no manifest entry. Invokable locally; not yet published to the team store.
-- **Available** — exists as a row in the workspace Notion DB but is not on this machine.
+- **Draft** — not yet ready for team consumption. Two flavors: (1) local-only (central-store dir exists, no manifest entry, no Notion row), or (2) Notion-side (page exists with `Published = false`). Both share the `✎` marker in `list`.
+- **Available** — Notion row with `Published = true`, not installed on this machine.
 
 Two further sub-states for installed skills:
 
 - **Outdated** — the Notion page has changed since the user last synced.
-- **Local-edited** — the user edited the on-disk SKILL.md without publishing.
+- **Local-edited** — the user edited any file in the skill dir (SKILL.md or sibling) without publishing.
 
 The verb mapping:
 
@@ -83,11 +83,12 @@ State markers in the human-readable output:
 
 - `✓` installed
 - `↑` outdated (newer version in the store)
-- `✎` draft (local-only)
-- `·` available
-- `✗` excluded by `scope.exclude_skills`
+- `✎` draft (local-only OR Notion-side `Published=false`)
+- `·` available (in store, ready, not installed)
 - `!` invalid (Notion page missing required fields)
-- `<n>↓` install count when > 0
+- `<n>` install count appears in the Installs column
+
+`list --available` filters out drafts; `--drafts` shows only drafts; `--installed` includes outdated.
 
 ### Pull updates
 
@@ -133,9 +134,9 @@ When the user says "skill X isn't working" or "is skill X up to date":
 
 1. Run `notion-skills list <slug>` (or `list | grep <slug>`) to see the state marker.
 2. If `↑ outdated` → run `notion-skills sync` to pull, OR ask if the user has local edits worth publishing first.
-3. If `✎ draft` → tell them they need to `publish <slug>` to share.
-4. If `· available` → not installed yet; offer to `install <slug>`.
-5. If `✗ excluded` → the slug is in `scope.exclude_skills`; user has to remove it manually from `~/.notion-skills/scope.json`.
+3. If `✎ draft` (local-only) → tell them they need to `publish <slug>` to share.
+4. If `✎ draft` (Notion-side, `Published=false`) → the page exists in Notion but isn't ready. They can `publish <slug>` to flip the checkbox, or check it directly in Notion's UI.
+5. If `· available` → not installed yet; offer to `install <slug>`.
 6. If `! invalid` → the Notion page is missing required fields (no title or no Description). The user has to fix it in Notion.
 
 ## Troubleshooting
@@ -165,8 +166,8 @@ Backups in `~/.notion-skills/backup/` survive this only if you copy them out fir
 
 ```
 ~/.notion-skills/
-├── scope.json                  database id, sync targets, exclude_skills, gen_agent
-├── manifest.json               per-installed-skill sync state (page_id, hashes, last_edited_time)
+├── scope.json                  database id, sync targets, gen_agent
+├── manifest.json               per-installed-skill sync state (page_id, hashes, files, last_edited_time)
 ├── skills/<slug>/              every skill on this machine (installed + drafts)
 └── backup/                     auto-backups from uninstall + sync-overwrite
 

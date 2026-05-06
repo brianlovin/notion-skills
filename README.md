@@ -79,9 +79,9 @@ In Notion that's a row with the title `deslop`, a `Description` property, option
 
 The mental model is an app store. Skills move between three states:
 
-- **In the store** (a Notion page) — visible to your team.
+- **In the store** (a Notion page with `Published = true`) — ready for your team to install.
 - **Installed** (on your machine) — invokable by your agent CLIs.
-- **Drafted** (on your machine, not published) — yours alone until you publish it.
+- **Drafted** — either local-only (no Notion row yet) or in Notion with `Published = false`. Either way: not yet ready for the team. See [Drafts](#drafts).
 
 Verbs:
 
@@ -151,7 +151,7 @@ The agent writes the SKILL.md to `~/.notion-skills/skills/<slug>/`, exits, and `
 
 ```
 ~/.notion-skills/
-├── scope.json                  database id, sync targets, optional excludes
+├── scope.json                  database id, sync targets, gen agent
 ├── manifest.json               sync state for installed skills
 ├── skills/<slug>/              every skill on this machine (installed + drafts)
 └── backup/
@@ -200,7 +200,7 @@ notion-skills publish <slug>   # if you want it back in the store
 
 ## Schema reference
 
-`init` creates the store with `Name` + `Description` + `Installs`, plus three default views (**All** alphabetical, **Popular** sorted by install count, **New** by created date). Other columns are added progressively by `publish` when a skill that uses them shows up — most skills never need anything beyond Name + Description + Tags.
+`init` creates the store with `Name` + `Description` + `Tags` + `Installs` + `Published`, plus four default views (**All**, **Popular** by install count, **New**, **Drafts** for `Published=false` rows). Each view shows just `Name / Description / Tags / Installs` by default; everything else is hidden but toggleable per-view in Notion. Optional spec columns are added progressively by `publish` when a skill uses them — most skills never need anything beyond Name + Description + Tags.
 
 | Property | Frontmatter key | Type |
 |---|---|---|
@@ -265,7 +265,7 @@ A skill is a directory: alongside `SKILL.md`, you can ship sibling files (e.g. `
 - **Markdown** sibling files round-trip verbatim.
 - **Source code** files (`.ts`, `.py`, `.sh`, etc.) round-trip as a single fenced code block — no prose, just the source — so installing brings the file back byte-identical.
 
-Unsupported file types (binaries, unknown extensions) are skipped on publish with a warning. Notion file uploads will land on the v0.7+ list.
+Unsupported file types (binaries, unknown extensions) are skipped on publish with a warning. Native Notion file uploads are a future addition.
 
 When the local file is deleted and you `publish` again, the matching child page in Notion is archived. When a child page in Notion is archived (or never existed), the next `install` / `sync` won't materialize it locally.
 

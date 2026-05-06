@@ -14,7 +14,19 @@ Surprising behaviors that have bitten us before. New work that touches these are
 
 ## Default views
 
-Fresh databases get three views scaffolded at create-time (and reconciled on `init` for linked DBs): **All** (alphabetical), **Popular** (Installs descending), **New** (created_time descending). Logic in `src/notion.ts:ensureDefaultViews`. Fail-soft — Views API errors are swallowed (logged in `NOTION_SKILLS_DEBUG=1`) so users still get a working DB if their workspace blocks the endpoint.
+Fresh databases get four views scaffolded at create-time (and reconciled on `init` / `upgrade` for linked DBs): **All** (alphabetical), **Popular** (Installs descending), **New** (recent additions), **Drafts** (filter: `Published=false`). Logic in `src/notion.ts:ensureDefaultViews`. Fail-soft — Views API errors are swallowed (logged in `NOTION_SKILLS_DEBUG=1`) so users still get a working DB if their workspace blocks the endpoint.
+
+Each view shows only the high-signal columns by default (Name / Description / Tags / Installs) with Name + Description frozen; the rest are toggleable in Notion's UI per-view. The `defaultVisibleInListView` flag in `SCHEMA` controls which columns surface.
+
+## Publish has three paths
+
+`publish <slug>` resolves to one of three operations, all of which set `Published=true`:
+
+1. **Local draft** (central-store dir, no manifest entry) → create the Notion page
+2. **Installed skill** (manifest entry exists) → update body + properties
+3. **Notion-side draft** (page exists with `Published=false`, no local presence) → flip the checkbox; no body upload
+
+Anything else is an error.
 
 ## Notion API constraints
 
