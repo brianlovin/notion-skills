@@ -20,10 +20,14 @@ import {
 } from "../targets.js";
 import { MANIFEST_FILE, ROOT_DIR, SKILLS_STORE } from "../paths.js";
 import { startTask } from "./_progress.js";
+import type { Source } from "../sources.js";
+import { defaultSource } from "../sources.js";
+import { pickSource } from "./_resolve.js";
 
 interface UninstallOptions {
   all?: boolean;
   tag?: string[];
+  source?: string;
   yes?: boolean;
 }
 
@@ -59,7 +63,9 @@ export async function uninstallCommand(
     );
   }
 
-  const manifest = await readManifest(MANIFEST_FILE);
+  const defaultKey =
+    defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
+  const manifest = await readManifest(MANIFEST_FILE, defaultKey);
   const targetSlugs = await resolveTargets(slugs, opts, manifest, scope);
   if (targetSlugs.length === 0) {
     console.log(chalk.dim("No matching skills to remove."));
@@ -192,7 +198,7 @@ async function resolveTargets(
   slugs: string[],
   opts: UninstallOptions,
   manifest: Manifest | null,
-  scope: { data_source_id: string },
+  scope: import("../scope.js").Scope,
 ): Promise<string[]> {
   // Dir-based discovery covers both installed (manifest entry) and
   // drafts (no manifest entry). Both are valid uninstall targets.
@@ -206,10 +212,13 @@ async function resolveTargets(
     if (slugs.length > 0) {
       throw new Error("--all and explicit slugs are mutually exclusive.");
     }
-    // --all means "every installed skill on this machine." Drafts are
-    // intentionally excluded — wiping unpublished work without an
-    // explicit slug would be surprising.
-    return [...installed].sort();
+    // --all means "every installed skill on this machine," scoped to a
+    // specific source if --source is given. Drafts excluded.
+    const all = [...installed];
+    if (opts.source) {
+      return all.filter((s) => manifest?.skills[s]?.source_key === opts.source).sort();
+    }
+    return all.sort();
   }
 
   if (opts.tag && opts.tag.length > 0) {
@@ -218,7 +227,10 @@ async function resolveTargets(
     }
     await assertNtnInstalled();
     const client = new NotionClient();
-    const pages = await client.queryDataSource(scope.data_source_id);
+    // Tag operations are source-scoped (each Notion DB has its own tag
+    // option set; semantics differ across sources).
+    const source = await pickSource(opts.source, scope);
+    const pages = await client.queryDataSource(source.data_source_id);
     const wanted = opts.tag
       .flatMap((t) => t.split(","))
       .map((t) => t.trim())
@@ -228,21 +240,25 @@ async function resolveTargets(
       if (page.archived || page.in_trash) continue;
       const title = readTitle(page.properties);
       if (!title) continue;
-      const slug = slugify(title);
-      if (!installed.has(slug)) continue;
+      const sourceSlug = slugify(title);
       const tags = readMultiSelect(page.properties, "Tags");
-      if (wanted.every((w) => tags.includes(w))) matched.push(slug);
+      if (!wanted.every((w) => tags.includes(w))) continue;
+      // Find the local_slug in this source whose source_slug matches.
+      for (const [localSlug, entry] of Object.entries(manifest?.skills ?? {})) {
+        if (entry.source_key === source.key && entry.source_slug === sourceSlug) {
+          matched.push(localSlug);
+        }
+      }
     }
     if (matched.length === 0) {
       throw new Error(
-        `No installed skills found with ${wanted.length === 1 ? "tag" : "all of tags"} ${wanted.join(", ")}.`,
+        `No installed skills found with ${wanted.length === 1 ? "tag" : "all of tags"} ${wanted.join(", ")} in source "${source.key}".`,
       );
     }
-    return matched.sort();
+    return [...new Set(matched)].sort();
   }
 
-  // Explicit slug list: validate every entry is on this machine
-  // (installed OR draft). We don't auto-skip missing — surfaces typos.
+  // Explicit slug list: each input is a local_slug (the dir on disk).
   const valid = new Set(onDisk);
   const missing = slugs.filter((s) => !valid.has(s));
   if (missing.length > 0) {

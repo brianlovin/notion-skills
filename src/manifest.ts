@@ -2,7 +2,29 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 
+/**
+ * Per-installed-skill state. Manifest is keyed by `local_slug` (the
+ * directory name on disk and what every agent CLI sees) — that's the
+ * one canonical identity. `source_key` + `source_slug` together form
+ * the "global" identifier `<source>/<source_slug>`; we never use that
+ * compound string as a key.
+ *
+ * After install, `local_slug === source_slug` unless a slug-collision
+ * forced auto-namespace at install time. After a Notion-side rename,
+ * `source_slug` is updated to match the new title; `local_slug` is
+ * also updated if the new source_slug doesn't collide with another
+ * installed skill, otherwise it stays stable.
+ */
 export interface ManifestEntry {
+  /** The configured Source's stable key. */
+  source_key: string;
+  /**
+   * The skill's slug as derived from its Notion page title. Updates
+   * automatically on rename detection. Equals `local_slug` in the
+   * common case; differs only when collision avoidance forced the
+   * local_slug to be auto-namespaced.
+   */
+  source_slug: string;
   page_id: string;
   /**
    * Best-effort cache of the page's `last_edited_time` AS OF the last
@@ -46,36 +68,90 @@ export interface ManifestEntry {
 }
 
 export interface Manifest {
-  version: 1;
-  database_id: string;
-  data_source_id: string;
+  version: 2;
   last_synced_at: string;
   /**
    * Drift-hash scheme version. When the manifest's hash_v is older than
    * src/page-hash.ts:HASH_V, drift checks treat existing entries as
    * "needs rebaseline" — they recompute hashes from current page state
-   * without flagging drift. Optional for forward-compat with manifests
-   * written before this field existed (treated as 1).
+   * without flagging drift.
    */
-  hash_v?: number;
+  hash_v: number;
+  /** Keyed by local_slug (the dir name on disk). */
   skills: Record<string, ManifestEntry>;
 }
 
-export function emptyManifest(databaseId: string, dataSourceId: string): Manifest {
+// ---------- v1 → v2 migration ----------
+
+interface ManifestV1Entry {
+  page_id: string;
+  last_edited_time: string;
+  props_hash: string;
+  body_hash?: string;
+  local_hash?: string;
+  files?: string[];
+}
+
+interface ManifestV1 {
+  version: 1;
+  database_id: string;
+  data_source_id: string;
+  last_synced_at: string;
+  hash_v?: number;
+  skills: Record<string, ManifestV1Entry>;
+}
+
+type AnyManifest = Manifest | ManifestV1 | (Omit<ManifestV1, "version"> & { version?: number });
+
+function isV2(m: AnyManifest): m is Manifest {
+  return (m as Manifest).version === 2;
+}
+
+/**
+ * Promote a v1 manifest to v2 by attaching every entry to the given
+ * default source key. The source_slug for each entry is the existing
+ * key (which was the slug under v1's flat keying).
+ *
+ * The caller passes the default source key; we don't read scope from
+ * disk here so manifest migration stays a pure function.
+ */
+export function migrateV1ToV2(v1: ManifestV1 | (Omit<ManifestV1, "version"> & { version?: number }), defaultSourceKey: string): Manifest {
+  const skills: Record<string, ManifestEntry> = {};
+  for (const [slug, entry] of Object.entries(v1.skills ?? {})) {
+    skills[slug] = {
+      source_key: defaultSourceKey,
+      source_slug: slug,
+      page_id: entry.page_id,
+      last_edited_time: entry.last_edited_time,
+      props_hash: entry.props_hash,
+      body_hash: entry.body_hash,
+      local_hash: entry.local_hash,
+      files: entry.files,
+    };
+  }
   return {
-    version: 1,
-    database_id: databaseId,
-    data_source_id: dataSourceId,
+    version: 2,
+    last_synced_at: v1.last_synced_at ?? new Date(0).toISOString(),
+    hash_v: v1.hash_v ?? 2,
+    skills,
+  };
+}
+
+export function emptyManifest(): Manifest {
+  return {
+    version: 2,
     last_synced_at: new Date(0).toISOString(),
-    hash_v: 2,
+    hash_v: 3,
     skills: {},
   };
 }
 
-export async function readManifest(file: string): Promise<Manifest | null> {
+export async function readManifest(file: string, defaultSourceKey: string): Promise<Manifest | null> {
   try {
     const raw = await readFile(file, "utf8");
-    return JSON.parse(raw) as Manifest;
+    const parsed = JSON.parse(raw) as AnyManifest;
+    if (isV2(parsed)) return parsed;
+    return migrateV1ToV2(parsed as ManifestV1, defaultSourceKey);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
@@ -114,12 +190,15 @@ function entryMatches(
 
 export interface DiffResult {
   toFetch: string[];   // page ids whose content needs re-fetching (new or changed)
-  toRemove: string[];  // skill names to delete (in old, not in new keep set)
-  unchanged: string[]; // skill names that can be skipped
+  toRemove: string[];  // local_slug values to delete (in old, not in new keep set)
+  unchanged: string[]; // local_slug values that can be skipped
 }
 
 export interface CurrentPageSummary {
+  /** Source-side slug (Notion title slugified). */
   name: string;
+  /** Source the page belongs to (sync iterates this scope). */
+  source_key: string;
   pageId: string;
   lastEditedTime: string;
   /**
@@ -130,26 +209,53 @@ export interface CurrentPageSummary {
   propsHash: string;
 }
 
+/**
+ * Diff a v2 manifest against a list of currently-visible pages, scoped
+ * to the source(s) the pages came from. Pages that aren't in the
+ * provided source set are left alone (their entries stay in the
+ * manifest untouched — could belong to a different source not being
+ * synced this round).
+ */
 export function diffManifest(
   oldManifest: Manifest,
   current: CurrentPageSummary[],
+  scopedSourceKeys: Set<string>,
 ): DiffResult {
-  const currentByName = new Map(current.map((c) => [c.name, c]));
-  const toFetch: string[] = [];
-  const unchanged: string[] = [];
-
+  const currentByLocal = new Map<string, CurrentPageSummary>();
+  // Match an installed entry to a current page by source_key + source_slug.
   for (const c of current) {
-    const old = oldManifest.skills[c.name];
-    if (!old || old.page_id !== c.pageId || !entryMatches(old, c)) {
-      toFetch.push(c.pageId);
-    } else {
-      unchanged.push(c.name);
+    for (const [localSlug, old] of Object.entries(oldManifest.skills)) {
+      if (old.source_key === c.source_key && old.source_slug === c.name) {
+        currentByLocal.set(localSlug, c);
+      }
     }
   }
 
+  const toFetch: string[] = [];
+  const unchanged: string[] = [];
+
+  // For currently-visible pages: are they installed? If not, leave alone
+  // (sync is install-narrowed). If yes, decide unchanged vs toFetch.
+  for (const [localSlug, old] of Object.entries(oldManifest.skills)) {
+    if (!scopedSourceKeys.has(old.source_key)) continue;
+    const c = currentByLocal.get(localSlug);
+    if (!c) {
+      // Installed but no longer visible in source — remove.
+      continue;
+    }
+    if (old.page_id !== c.pageId || !entryMatches(old, c)) {
+      toFetch.push(c.pageId);
+    } else {
+      unchanged.push(localSlug);
+    }
+  }
+
+  // Removals: installed entries from a scoped source whose page is gone.
+  const visibleByLocal = new Set(currentByLocal.keys());
   const toRemove: string[] = [];
-  for (const name of Object.keys(oldManifest.skills)) {
-    if (!currentByName.has(name)) toRemove.push(name);
+  for (const [localSlug, entry] of Object.entries(oldManifest.skills)) {
+    if (!scopedSourceKeys.has(entry.source_key)) continue;
+    if (!visibleByLocal.has(localSlug)) toRemove.push(localSlug);
   }
 
   return { toFetch, toRemove, unchanged };

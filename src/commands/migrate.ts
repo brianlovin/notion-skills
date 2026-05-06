@@ -24,12 +24,16 @@ import {
   upsertSkillFilePages,
 } from "../skill-files.js";
 import { startTask } from "./_progress.js";
+import { pickSource } from "./_resolve.js";
+import type { Source } from "../sources.js";
 
 interface MigrateOptions {
   from?: string[];
   overwrite?: boolean;
   dryRun?: boolean;
   yes?: boolean;
+  /** Source key to push to. Resolved via the standard picker. */
+  source?: string;
   /**
    * Restrict the migration to these slugs. Skills not in the set are
    * silently dropped (managed/invalid are also dropped). Used by `init`
@@ -48,6 +52,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
       "No scope configured. Run `notion-skills init` first.",
     );
   }
+  const source = await pickSource(opts.source, scope);
 
   // Resolve sources. The central store is always scanned: a SKILL.md
   // sitting there with no manifest entry is a local-only skill that
@@ -63,9 +68,17 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
 
   // Manifest tells us which central-store entries are already synced
   // from Notion (so they aren't candidates for re-upload).
-  const manifest = await readManifest(MANIFEST_FILE);
+  const manifest = await readManifest(MANIFEST_FILE, source.key);
+  // Local skills are "tracked" if their dir name (local_slug) is the
+  // source_slug of an existing entry from the same source — i.e. would
+  // collide on re-upload. We only consider this source's entries since
+  // a skill in another source's column doesn't block a new upload here.
   const trackedNames = new Set(
-    manifest ? Object.keys(manifest.skills) : [],
+    manifest
+      ? Object.values(manifest.skills)
+          .filter((e) => e.source_key === source.key)
+          .map((e) => e.source_slug)
+      : [],
   );
 
   // Caller-curated runs (init/sync) suppress the source/probe prelude —
@@ -89,7 +102,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   if (verbose) {
     process.stdout.write(chalk.dim("Checking Notion for existing skills... "));
   }
-  const existing = await client.queryDataSource(scope.data_source_id);
+  const existing = await client.queryDataSource(source.data_source_id);
   if (verbose) {
     console.log(chalk.green("✓") + chalk.dim(` ${existing.length} pages`));
   }
@@ -153,7 +166,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
     const ok = await confirm({
       message: `Create ${willCreate.length} new ${newWord}${
         willOverwrite.length ? ` and overwrite ${willOverwrite.length}` : ""
-      } in "${scope.database_title ?? "Skills"}"?`,
+      } in "${source.name}"?`,
       default: true,
     });
     if (!ok) {
@@ -176,7 +189,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
     }
   }
   if (neededProps.size > 0) {
-    await client.upgradeSchema(scope.data_source_id, { only: neededProps });
+    await client.upgradeSchema(source.data_source_id, { only: neededProps });
   }
 
   // Self-heal select properties: any agent / model values referenced by
@@ -185,7 +198,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   // Must run AFTER upgradeSchema so the columns exist to attach options to.
   const selfHealing = collectSelfHealingValues([...willCreate, ...willOverwrite]);
   if (selfHealing.size > 0) {
-    await client.ensureSelectOptions(scope.data_source_id, selfHealing);
+    await client.ensureSelectOptions(source.data_source_id, selfHealing);
   }
 
   // ---------- Phase 1: write to Notion ----------
@@ -217,7 +230,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   // Snapshot the data source's columns once per migrate run for
   // metadata round-trip (frontmatter `metadata.<key>` is matched
   // against existing column names; non-matching keys are skipped).
-  const dataSource = await client.getDataSource(scope.data_source_id);
+  const dataSource = await client.getDataSource(source.data_source_id);
   const existingColumns = new Set(Object.keys(dataSource.properties));
 
   for (const c of willCreate) {
@@ -225,7 +238,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
     const task = startTask(c.skill.name);
     try {
       const pageId = await client.createSkillPage(
-        scope.data_source_id,
+        source.data_source_id,
         // Running `publish` is an explicit "ship it" gesture, so new
         // CLI-published pages start with Published=true. Notion-side
         // drafts (created via Notion's UI) default to false instead.

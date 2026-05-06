@@ -7,9 +7,13 @@ import { ntnApi } from "../ntn.js";
 import { slugify } from "../convert.js";
 import { readManifest, writeManifest } from "../manifest.js";
 import { MANIFEST_FILE } from "../paths.js";
+import { defaultSource, findByKey } from "../sources.js";
+import { pickSource } from "./_resolve.js";
+import { resolveInstalledRef } from "../resolvers.js";
 
 interface UnpublishOptions {
   yes?: boolean;
+  source?: string;
 }
 
 /**
@@ -38,18 +42,39 @@ export async function unpublishCommand(
   await assertNtnInstalled();
   const client = new NotionClient();
 
-  // Find the page in the workspace store.
-  const pages = await client.queryDataSource(scope.data_source_id);
-  const match = pages.find((p) => {
-    if (p.archived || p.in_trash) return false;
-    const title = readTitle(p.properties);
-    return slugify(title) === slug;
-  });
+  // First check the manifest: an installed skill knows its own source.
+  // Skip the cross-source search in that case.
+  const defaultKey =
+    defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
+  const manifestEarly = await readManifest(MANIFEST_FILE, defaultKey);
+  let pageId: string | undefined;
+  let resolvedSourceKey: string | undefined;
 
-  if (!match) {
-    throw new Error(
-      `Skill "${slug}" is not in the store (or already unpublished).`,
-    );
+  if (manifestEarly) {
+    const ref = resolveInstalledRef(slug, scope.sources, manifestEarly);
+    if (ref.ok) {
+      pageId = ref.entry.page_id;
+      resolvedSourceKey = ref.source.key;
+      slug = ref.localSlug;
+    }
+  }
+
+  if (!pageId) {
+    // Not installed — search a chosen source for the slug.
+    const source = await pickSource(opts.source, scope);
+    const pages = await client.queryDataSource(source.data_source_id);
+    const match = pages.find((p) => {
+      if (p.archived || p.in_trash) return false;
+      const title = readTitle(p.properties);
+      return slugify(title) === slug;
+    });
+    if (!match) {
+      throw new Error(
+        `Skill "${slug}" is not in source "${source.key}" (or already unpublished).`,
+      );
+    }
+    pageId = match.id;
+    resolvedSourceKey = source.key;
   }
 
   if (!opts.yes && process.stdin.isTTY) {
@@ -70,12 +95,12 @@ export async function unpublishCommand(
   }
 
   // ntn's PATCH /v1/pages with in_trash: true archives the page.
-  await ntnApi("PATCH", `/v1/pages/${match.id}`, { in_trash: true }, "2025-09-03");
+  await ntnApi("PATCH", `/v1/pages/${pageId}`, { in_trash: true }, "2025-09-03");
 
   // Drop the manifest entry too — the skill is no longer in the store,
   // so it shouldn't be tracked as installed. Local copy stays on disk
   // (effectively a draft); user can re-publish or uninstall.
-  const manifest = await readManifest(MANIFEST_FILE);
+  const manifest = await readManifest(MANIFEST_FILE, defaultKey);
   if (manifest && manifest.skills[slug]) {
     const next = { ...manifest, skills: { ...manifest.skills } };
     delete next.skills[slug];

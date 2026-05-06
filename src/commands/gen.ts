@@ -80,7 +80,10 @@ export async function genCommand(
   // publishing. We don't push to Notion — that's the publish step.
   const added = newSkillDirs(SKILLS_STORE, skillsBefore);
   if (added.length > 0) {
-    const manifest = await readManifest(MANIFEST_FILE);
+    const { defaultSource } = await import("../sources.js");
+    const defaultKey =
+      defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
+    const manifest = await readManifest(MANIFEST_FILE, defaultKey);
     const trackedNames = new Set(
       manifest ? Object.keys(manifest.skills) : [],
     );

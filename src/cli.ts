@@ -19,6 +19,14 @@ import { installCommand } from "./commands/install.js";
 import { uninstallCommand } from "./commands/uninstall.js";
 import { unpublishCommand } from "./commands/unpublish.js";
 import { openCommand } from "./commands/open.js";
+import {
+  sourceAddCommand,
+  sourceDefaultCommand,
+  sourceHelpCommand,
+  sourceListCommand,
+  sourceRemoveCommand,
+  sourceRenameCommand,
+} from "./commands/source.js";
 
 // Read version from package.json so `--version` stays in sync with bumps
 // without us remembering to edit two places.
@@ -63,7 +71,8 @@ program
   .option("--available", "only skills in the store that aren't installed")
   .option("--outdated", "only installed skills with newer versions in the store")
   .option("--drafts", "only local drafts (not yet published)")
-  .option("--tag <tag...>", "filter by tag (repeatable; matches all)")
+  .option("--tag <tag...>", "filter by tag (source-scoped; matches all)")
+  .option("--source <key>", "scope to a specific source")
   .option("--sort <key>", "sort order: name (default), popular (by install count), new (most recently created)", "name")
   .option("--json", "machine-readable JSON output")
   .action(listCommand);
@@ -82,6 +91,8 @@ program
 program
   .command("upgrade")
   .description("Add any missing skill-spec properties to your Notion database schema")
+  .option("--source <key>", "scope to a specific source")
+  .option("--all", "run against every configured source")
   .action(upgradeCommand);
 
 program
@@ -93,10 +104,12 @@ program
 
 program
   .command("install")
-  .description("Pull a skill from the workspace store onto this machine")
-  .argument("[slugs...]", "skill slugs to install")
-  .option("--all", "install every skill in the store that isn't already installed")
-  .option("--tag <tag...>", "install all skills matching these tags (all-must-match)")
+  .description("Pull a skill from the workspace store onto this machine. Refs can be bare (`deploy`) or qualified (`team/deploy`).")
+  .argument("[slugs...]", "skill refs to install")
+  .option("--all", "install every skill in the source (source-scoped)")
+  .option("--tag <tag...>", "install all skills matching these tags (source-scoped; all-must-match)")
+  .option("--source <key>", "scope --all/--tag to this source; ignored for explicit refs")
+  .option("--as <name>", "override the local slug (single-skill installs only)")
   .action(installCommand);
 
 program
@@ -112,9 +125,10 @@ program
 program
   .command("uninstall")
   .description("Remove a skill from this machine (Notion page is untouched). Pass slugs, --tag, or --all.")
-  .argument("[slugs...]", "skill slugs to remove")
-  .option("--all", "remove every installed skill on this machine")
-  .option("--tag <tag...>", "remove all installed skills matching these tags (all-must-match)")
+  .argument("[slugs...]", "skill local slugs to remove")
+  .option("--all", "remove every installed skill on this machine (--source narrows to one source)")
+  .option("--tag <tag...>", "remove all installed skills matching these tags (source-scoped)")
+  .option("--source <key>", "scope --all/--tag to one source")
   .option("-y, --yes", "skip the confirmation prompt")
   .action(uninstallCommand);
 
@@ -123,6 +137,7 @@ program
   .description("Push a local skill to the workspace store. Pass slugs or --all.")
   .argument("[slugs...]", "skill slugs to publish")
   .option("--all", "publish every local-only skill in the central store")
+  .option("--source <key>", "target a specific source (default: default source / picker)")
   .option("-y, --yes", "skip the confirmation prompt")
   .action(publishCommand);
 
@@ -130,6 +145,7 @@ program
   .command("unpublish")
   .description("Remove a skill from the workspace store (archives the Notion page)")
   .argument("<slug>", "skill slug to remove from the store")
+  .option("--source <key>", "scope to one source when looking up a non-installed slug")
   .option("-y, --yes", "skip the confirmation prompt")
   .action(unpublishCommand);
 
@@ -137,8 +153,43 @@ program
   .command("import")
   .description("Bulk-import pre-existing local skills into the store")
   .option("--from <path...>", "extra directories to scan, e.g. an old skills repo")
+  .option("--source <key>", "target source for the import")
   .option("-y, --yes", "skip the confirmation prompt")
   .action(importCommand);
+
+const sourceCmd = program
+  .command("source")
+  .description("Manage Notion skill sources (databases) configured on this machine")
+  .action(sourceHelpCommand);
+
+sourceCmd
+  .command("add")
+  .description("Link or create another Notion database as a source")
+  .option("--key <key>", "explicit source key (defaults to a slug derived from the database title)")
+  .action(sourceAddCommand);
+
+sourceCmd
+  .command("list")
+  .description("Show all configured sources")
+  .option("--json", "machine-readable JSON output")
+  .action(sourceListCommand);
+
+sourceCmd
+  .command("remove <key>")
+  .description("Remove a source. Prompts for installed skills (uninstall vs keep as drafts).")
+  .option("-y, --yes", "skip the prompt; default action is uninstall")
+  .option("--keep-skills", "demote installed skills from this source to local-only drafts")
+  .action((key, opts) => sourceRemoveCommand(key, opts));
+
+sourceCmd
+  .command("default <key>")
+  .description("Set the default source for unscoped commands")
+  .action(sourceDefaultCommand);
+
+sourceCmd
+  .command("rename <old> <new>")
+  .description("Rename a source key. Rewrites manifest entries.")
+  .action(sourceRenameCommand);
 
 program
   .command("migrate", { hidden: true })

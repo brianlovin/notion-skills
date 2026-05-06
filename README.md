@@ -44,22 +44,29 @@ Requires macOS or Linux and Node.js 18+.
 
 | Command | What it does |
 |---|---|
-| `init` | First-time setup: create or link a Notion skill store. |
-| `list` | See what's in the store. Filter with `--installed`, `--available`, `--outdated`, `--drafts`, `--tag`. Sort with `--sort name\|popular\|new`. |
-| `install <slug>` | Pull a skill onto your machine. Bulk: `--tag`, `--all`. |
+| `init` | First-time setup: create or link a Notion skill store. Re-run to add another source. |
+| `list` | See what's in the store(s). Filter with `--installed`, `--available`, `--outdated`, `--drafts`, `--tag`, `--source`. Sort with `--sort name\|popular\|new`. |
+| `install <slug>` | Pull a skill onto your machine. Refs are bare (`deploy`) or qualified (`team/deploy`). Bulk: `--tag`, `--all` (source-scoped). |
 | `uninstall <slug>` | Remove from your machine. The Notion page stays. |
-| `sync` | Pull updates for installed skills. |
-| `gen <input>` | Generate a new skill from a URL, file, or prompt. |
-| `publish <slug>` | Push a local skill (or edits) to the store. Bulk: `--all`. |
+| `sync` | Pull updates for installed skills across every source. |
+| `gen <input>` | Generate a new skill from a URL, file, or prompt. Local-only until you `publish`. |
+| `publish <slug>` | Push a local skill (or edits) to the store. Bulk: `--all`. Source picker fires for new drafts when 2+ sources exist; `--source` skips. |
 | `unpublish <slug>` | Archive a skill in the store. |
 | `open <slug>` | Open the skill in Notion. Use `--local` to open the file in your editor. |
-| `doctor` | Diagnose problems. `--fix` repairs safe issues. |
+| `source` | Manage Notion sources: `add`, `list`, `remove`, `default`, `rename`. |
+| `doctor` | Diagnose problems across every source. `--fix` repairs safe issues. |
 
 Run any command with `--help` for the full list of options.
 
 ## Drafts
 
 A skill is **ready** or a **draft**. Drafts aren't yet ready for the team — they live on your machine without a Notion row, or in Notion with the `Published` checkbox off. Drafts are skipped by default in install flows; pass `--drafts` to see them or install one by name. Run `publish` to mark a draft ready.
+
+## Multiple sources
+
+A "source" is one Notion database. Most users have one (the team store) and never think about it. Larger workflows want more — engineering store, personal store, a department-specific store. Run `notion-skills source add` to link or create another database; bare commands target the **default** source (the first one you set up). Use a qualified ref (`team/deploy`) or `--source <key>` when you want to be explicit. Tags are source-scoped (each Notion DB has its own tag set), so `--tag` always operates on a single source.
+
+When you install two skills with the same slug from different sources, the second one auto-namespaces (`personal-deploy`) so both can coexist. Override with `--as <name>`.
 
 ## What's in a skill?
 

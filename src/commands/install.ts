@@ -5,6 +5,7 @@ import { confirm } from "@inquirer/prompts";
 import { getScope } from "../scope.js";
 import {
   NotionClient,
+  type NotionPage,
   readCheckbox,
   readMultiSelect,
   readTitle,
@@ -18,7 +19,6 @@ import {
 import {
   type Manifest,
   emptyManifest,
-  hashContent,
   readManifest,
   writeManifest,
 } from "../manifest.js";
@@ -39,176 +39,100 @@ import {
   detectSlugCollisions,
 } from "../slug-collisions.js";
 import { startTask } from "./_progress.js";
+import { type Source, parseSkillRef, defaultSource } from "../sources.js";
+import { chooseLocalSlug } from "../resolvers.js";
+import { pickSource } from "./_resolve.js";
 
 interface InstallOptions {
   all?: boolean;
   tag?: string[];
+  source?: string;
+  /** Override the local slug for a single-skill install (collision dodge). */
+  as?: string;
+}
+
+interface Candidate {
+  source: Source;
+  page: NotionPage;
+  /** source-side slug (slugify(title)). */
+  sourceSlug: string;
+  isDraft: boolean;
 }
 
 /**
  * Pull a skill (or set of skills) from the workspace store onto this
- * machine. After install:
- *   - SKILL.md lives at ~/.notion-skills/skills/<slug>/SKILL.md
- *   - Symlinks fan out to every configured target dir
- *   - Manifest tracks the slug as installed
- *   - Type /<slug> in any agent CLI and it works
+ * machine. Single-skill mode resolves refs cross-source; bulk modes
+ * (--tag, --all) scope to a single source via the resolver.
  */
 export async function installCommand(
-  slugs: string[],
+  refs: string[],
   opts: InstallOptions,
 ): Promise<void> {
   const scope = await getScope();
   if (!scope) {
     throw new Error("No scope configured. Run `notion-skills init` first.");
   }
-
-  if (!opts.all && !opts.tag && slugs.length === 0) {
+  if (!opts.all && !opts.tag && refs.length === 0) {
     throw new Error(
       "Usage: notion-skills install <slug...> | --tag <name> | --all",
     );
+  }
+  if (opts.as && refs.length !== 1) {
+    throw new Error("--as only applies when installing exactly one skill.");
   }
 
   await assertNtnInstalled();
   const client = new NotionClient();
 
-  // Fetch all pages once; we filter client-side. Cheaper than per-slug
-  // queries and gives us tag info in the same response.
-  const pages = await client.queryDataSource(scope.data_source_id);
+  const defaultKey = defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
+  const manifest = (await readManifest(MANIFEST_FILE, defaultKey)) ?? emptyManifest();
 
-  const manifest =
-    (await readManifest(MANIFEST_FILE)) ??
-    emptyManifest(scope.database_id, scope.data_source_id);
-  const trackedNames = new Set(Object.keys(manifest.skills));
-
-  // Detect colliding slugs before resolving candidates. Direct slug
-  // installs of a colliding name MUST fail — we can't pick which page
-  // the user meant. Bulk modes (--tag, --all) skip them with a warning
-  // and proceed with the unambiguous remainder.
-  const collisions = detectSlugCollisions(pages);
-  const colliding = collidingSlugSet(collisions);
-
-  // Detect whether the data source has the Published column at all.
-  // When absent, every row is treated as ready (backward compat).
-  const publishedColumnExists = pages.some(
-    (p) => p.properties.Published !== undefined,
-  );
-
-  // Build candidate set based on flags.
-  interface Candidate {
-    name: string;
-    pageId: string;
-    pageIndex: number;
-    isDraft: boolean;
-  }
-  const allCandidates: Candidate[] = [];
-  for (let i = 0; i < pages.length; i++) {
-    const page = pages[i]!;
-    if (page.archived || page.in_trash) continue;
-    const title = readTitle(page.properties);
-    if (!title) continue;
-    const name = slugify(title);
-    if (colliding.has(name)) continue;
-    const isDraft =
-      publishedColumnExists && !readCheckbox(page.properties, "Published");
-    allCandidates.push({ name, pageId: page.id, pageIndex: i, isDraft });
-  }
-
+  // Decide which sources to query and how candidates get matched.
   let candidates: Candidate[];
-  if (slugs.length > 0) {
-    const requested = new Set(slugs);
-
-    // If any requested slug collides, fail loud — we won't silently
-    // pick one of the duplicates.
-    const collidingRequested = collisions.filter((c) => requested.has(c.slug));
-    if (collidingRequested.length > 0) {
-      const lines = collidingRequested.map(
-        (c) =>
-          `  ${c.slug}: ${c.titles.length} pages with the same title (${c.titles.join(", ")})`,
-      );
-      throw new Error(
-        [
-          `Cannot install: the following ${collidingRequested.length === 1 ? "slug is" : "slugs are"} ambiguous in the store.`,
-          ...lines,
-          `Rename one of the colliding pages in Notion, then re-run.`,
-        ].join("\n"),
-      );
-    }
-
-    candidates = allCandidates.filter((c) => requested.has(c.name));
-    const found = new Set(candidates.map((c) => c.name));
-    const missing = [...requested].filter((s) => !found.has(s));
-    if (missing.length > 0) {
-      throw new Error(
-        `Cannot install: ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not in the store. Run \`notion-skills list\` to see what's available.`,
-      );
-    }
-  } else if (opts.tag && opts.tag.length > 0) {
-    const wanted = opts.tag.flatMap((t) => t.split(",")).map((t) => t.trim()).filter(Boolean);
-    candidates = allCandidates.filter((c) => {
-      if (c.isDraft) return false;
-      const tags = readMultiSelect(pages[c.pageIndex]!.properties, "Tags");
-      return wanted.every((w) => tags.includes(w));
-    });
-    if (candidates.length === 0) {
-      throw new Error(
-        `No skills found with ${wanted.length === 1 ? "tag" : "all of tags"} ${wanted.join(", ")}.`,
-      );
-    }
+  if (opts.tag || opts.all) {
+    const source = await pickSource(opts.source, scope);
+    candidates = await collectCandidates(client, [source]);
+    candidates = filterBulk(candidates, opts);
   } else {
-    // --all: skip drafts. The user has to install drafts by explicit
-    // slug — bulk operations don't auto-include unfinished work.
-    candidates = allCandidates.filter((c) => !c.isDraft);
+    // Single-skill mode: parse each ref, fan out to required sources.
+    candidates = await resolveSingleRefs(client, scope.sources, refs);
   }
 
-  // Bulk-mode warnings: surface what we skipped so the user can react.
-  // Explicit-slug mode handled above (collisions error; drafts are
-  // allowed by the explicit-slug path because the user asked for them
-  // by name).
-  if (slugs.length === 0) {
-    if (collisions.length > 0) {
-      console.log(
-        chalk.yellow(
-          `Skipping ${collisions.length} ambiguous ${collisions.length === 1 ? "slug" : "slugs"} (multiple pages share each): ${collisions.map((c) => c.slug).join(", ")}.`,
-        ),
-      );
-    }
-    const draftCount = allCandidates.filter((c) => c.isDraft).length;
-    if (draftCount > 0) {
-      console.log(
-        chalk.dim(
-          `Skipping ${draftCount} ${draftCount === 1 ? "draft" : "drafts"} (Published=false). Install by name to include.`,
-        ),
-      );
-    }
+  if (candidates.length === 0) {
+    console.log(chalk.dim("No matching skills found."));
+    return;
   }
 
-  // Filter out already-installed (idempotent install --all / --tag).
-  const newCandidates = candidates.filter((c) => !trackedNames.has(c.name));
-  const alreadyInstalled = candidates.filter((c) => trackedNames.has(c.name));
-
-  if (newCandidates.length === 0) {
-    if (alreadyInstalled.length === 0) {
-      console.log(chalk.dim("No matching skills found."));
-    } else if (alreadyInstalled.length === 1) {
-      // Direct `install <slug>` on an already-installed skill — name
-      // the skill explicitly instead of "All 1 matching skill is …".
-      console.log(
-        chalk.dim(`${alreadyInstalled[0]!.name} is already installed.`),
-      );
+  // Filter out already-installed (by source + source_slug match against
+  // existing manifest entries).
+  const installedBySource = new Map<string, Set<string>>();
+  for (const e of Object.values(manifest.skills)) {
+    let bag = installedBySource.get(e.source_key);
+    if (!bag) installedBySource.set(e.source_key, (bag = new Set()));
+    bag.add(e.source_slug);
+  }
+  const fresh: Candidate[] = [];
+  const already: Candidate[] = [];
+  for (const c of candidates) {
+    if (installedBySource.get(c.source.key)?.has(c.sourceSlug)) {
+      already.push(c);
     } else {
-      console.log(
-        chalk.dim(
-          `All ${alreadyInstalled.length} matching skills are already installed.`,
-        ),
-      );
+      fresh.push(c);
+    }
+  }
+
+  if (fresh.length === 0) {
+    if (already.length === 1) {
+      console.log(chalk.dim(`${already[0]!.sourceSlug} is already installed.`));
+    } else {
+      console.log(chalk.dim(`All ${already.length} matching skills are already installed.`));
     }
     return;
   }
 
-  if (newCandidates.length > 5 && !slugs.length) {
-    // For bulk installs (tag/all), confirm.
+  if (fresh.length > 5 && refs.length === 0) {
     const ok = await confirm({
-      message: `Install ${newCandidates.length} ${newCandidates.length === 1 ? "skill" : "skills"}?`,
+      message: `Install ${fresh.length} ${fresh.length === 1 ? "skill" : "skills"}?`,
       default: true,
     });
     if (!ok) {
@@ -219,16 +143,15 @@ export async function installCommand(
 
   console.log(
     chalk.bold(
-      `Installing ${newCandidates.length} ${newCandidates.length === 1 ? "skill" : "skills"}:`,
+      `Installing ${fresh.length} ${fresh.length === 1 ? "skill" : "skills"}:`,
     ),
   );
 
-  // Make sure the Installs column exists on the data source before we
-  // try to increment it. Backwards-compat for stores created before
-  // this feature landed; cheap idempotent no-op for newer stores.
-  await client.upgradeSchema(scope.data_source_id, {
-    only: new Set(["Installs"]),
-  });
+  // Pre-warm Installs column on every source we're about to install from.
+  const sourcesTouched = new Set(fresh.map((c) => c.source));
+  for (const s of sourcesTouched) {
+    await client.upgradeSchema(s.data_source_id, { only: new Set(["Installs"]) });
+  }
 
   const nextManifest: Manifest = {
     ...manifest,
@@ -237,11 +160,11 @@ export async function installCommand(
     skills: { ...manifest.skills },
   };
 
-  for (const c of newCandidates) {
-    const task = startTask(c.name);
+  for (const c of fresh) {
+    const sourceTag = scope.sources.length > 1 ? chalk.dim(` [${c.source.key}]`) : "";
+    const task = startTask(c.sourceSlug + sourceTag);
     try {
-      const page = pages[c.pageIndex]!;
-      const converted = await convertPageToSkill(client, page);
+      const converted = await convertPageToSkill(client, c.page);
       if (!converted.ok) {
         task.fail(converted.reason);
         continue;
@@ -251,42 +174,40 @@ export async function installCommand(
         properties: skill.properties,
         body: skill.body,
       });
-      const dir = join(SKILLS_STORE, skill.properties.name);
+
+      // Choose the on-disk slug. Source-slug if free; else
+      // <source-key>-<slug>; else numeric suffix. --as overrides.
+      const choice = chooseLocalSlug(c.source.key, c.sourceSlug, nextManifest, opts.as);
+
+      const dir = join(SKILLS_STORE, choice.slug);
       await mkdir(dir, { recursive: true });
       await writeFile(join(dir, "SKILL.md"), md, "utf8");
-
-      // Materialize sibling files (multi-file skills). Each file is
-      // round-tripped through a child page on the row; here we write
-      // its content back to disk at the relative path encoded in the
-      // page title.
       await materializeFiles(dir, skill.files);
 
-      nextManifest.skills[skill.properties.name] = {
+      nextManifest.skills[choice.slug] = {
+        source_key: c.source.key,
+        source_slug: c.sourceSlug,
         page_id: skill.pageId,
         last_edited_time: skill.lastEditedTime,
-        props_hash: hashBehaviorProperties(page),
+        props_hash: hashBehaviorProperties(c.page),
         body_hash: hashSkillContent(skill.body, skill.files),
         local_hash: hashSkillContent(md, skill.files),
         files: skill.files.map((f) => f.path).sort(),
       };
 
-      // Fan symlinks out to every configured target dir.
       const targets = targetsForKeys(scope.targets);
       for (const t of targets) {
-        const link = targetSkillPath(t, skill.properties.name);
+        const link = targetSkillPath(t, choice.slug);
         await ensureSymlink(dir, link);
       }
 
-      // Bump the Installs counter so popular skills surface in `list`.
-      // Fail-soft and fire-and-forget for drift purposes: the PATCH
-      // bumps the page's last_edited_time, but we don't refetch — drift
-      // detection now compares props_hash + body_hash, both of which are
-      // unaffected by an Installs edit (Installs is metricOnly). The
-      // stale last_edited_time on this entry just means the next `list`
-      // takes the slow path once before re-caching.
       await client.incrementPageNumber(skill.pageId, "Installs");
 
-      task.done();
+      if (choice.autoNamespaced) {
+        task.done(`(installed as '${choice.slug}' to avoid collision)`);
+      } else {
+        task.done();
+      }
     } catch (err) {
       task.fail((err as Error).message.split("\n")[0]);
     }
@@ -294,10 +215,114 @@ export async function installCommand(
 
   await writeManifest(MANIFEST_FILE, nextManifest);
   console.log("");
-  console.log(chalk.green(`✓ Installed ${newCandidates.length} ${newCandidates.length === 1 ? "skill" : "skills"}.`));
-  if (alreadyInstalled.length > 0) {
-    console.log(
-      chalk.dim(`  (${alreadyInstalled.length} already installed, skipped.)`),
-    );
+  console.log(chalk.green(`✓ Installed ${fresh.length} ${fresh.length === 1 ? "skill" : "skills"}.`));
+  if (already.length > 0) {
+    console.log(chalk.dim(`  (${already.length} already installed, skipped.)`));
   }
+}
+
+// ---------- helpers ----------
+
+/**
+ * Query every given source's data source and return a flat list of
+ * candidates, each tagged with the originating Source. Skips archived/
+ * trashed pages and ones missing a title.
+ */
+async function collectCandidates(client: NotionClient, sources: Source[]): Promise<Candidate[]> {
+  const out: Candidate[] = [];
+  for (const source of sources) {
+    const pages = await client.queryDataSource(source.data_source_id);
+    const collisions = detectSlugCollisions(pages);
+    const colliding = collidingSlugSet(collisions);
+    const publishedColumn = pages.some((p) => p.properties.Published !== undefined);
+    for (const page of pages) {
+      if (page.archived || page.in_trash) continue;
+      const title = readTitle(page.properties);
+      if (!title) continue;
+      const sourceSlug = slugify(title);
+      if (colliding.has(sourceSlug)) continue;
+      const isDraft = publishedColumn && !readCheckbox(page.properties, "Published");
+      out.push({ source, page, sourceSlug, isDraft });
+    }
+  }
+  return out;
+}
+
+/**
+ * Bulk-mode filter: --tag and --all both skip drafts and (for --tag)
+ * apply tag set intersection.
+ */
+function filterBulk(candidates: Candidate[], opts: InstallOptions): Candidate[] {
+  const out = candidates.filter((c) => !c.isDraft);
+  if (!opts.tag || opts.tag.length === 0) return out;
+  const wanted = opts.tag.flatMap((t) => t.split(",")).map((t) => t.trim()).filter(Boolean);
+  return out.filter((c) => {
+    const tags = readMultiSelect(c.page.properties, "Tags");
+    return wanted.every((w) => tags.includes(w));
+  });
+}
+
+/**
+ * Resolve a list of refs against all configured sources. Each ref can
+ * be:
+ *   - bare slug (`deploy`): search all sources, error on ambiguity
+ *   - qualified (`team/deploy`): scope to that source
+ *
+ * Drafts are allowed in single-skill mode (the user named them).
+ */
+async function resolveSingleRefs(
+  client: NotionClient,
+  sources: Source[],
+  refs: string[],
+): Promise<Candidate[]> {
+  // Cache pages-by-source — avoid refetching on multiple refs.
+  const pagesBySource = new Map<string, Candidate[]>();
+  async function load(s: Source): Promise<Candidate[]> {
+    const cached = pagesBySource.get(s.key);
+    if (cached) return cached;
+    const cs = await collectCandidates(client, [s]);
+    pagesBySource.set(s.key, cs);
+    return cs;
+  }
+
+  const out: Candidate[] = [];
+  for (const ref of refs) {
+    const { sourceKey, slug } = parseSkillRef(ref);
+    if (sourceKey !== undefined) {
+      const source = sources.find((s) => s.key === sourceKey);
+      if (!source) {
+        throw new Error(
+          `Unknown source "${sourceKey}". Configured: ${sources.map((s) => s.key).join(", ")}.`,
+        );
+      }
+      const pool = await load(source);
+      const hit = pool.find((c) => c.sourceSlug === slug);
+      if (!hit) {
+        throw new Error(`${ref}: not found in source "${sourceKey}".`);
+      }
+      out.push(hit);
+    } else {
+      // Bare slug — search every source.
+      const matches: Candidate[] = [];
+      for (const source of sources) {
+        const pool = await load(source);
+        for (const c of pool) {
+          if (c.sourceSlug === slug) matches.push(c);
+        }
+      }
+      if (matches.length === 0) {
+        throw new Error(
+          `${ref}: not found in any source. Run \`notion-skills list\` to see what's available.`,
+        );
+      }
+      if (matches.length > 1) {
+        const refs = matches.map((m) => `${m.source.key}/${m.sourceSlug}`).join(", ");
+        throw new Error(
+          `${ref}: ambiguous, exists in multiple sources (${refs}). Qualify with <source>/<slug>.`,
+        );
+      }
+      out.push(matches[0]!);
+    }
+  }
+  return out;
 }

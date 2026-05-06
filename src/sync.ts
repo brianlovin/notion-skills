@@ -23,6 +23,8 @@ import {
   readManifest,
   writeManifest,
 } from "./manifest.js";
+import type { Source } from "./sources.js";
+import { defaultSource } from "./sources.js";
 import {
   HASH_V,
   hashBehaviorProperties,
@@ -114,7 +116,6 @@ export async function runSync(
   const quiet = !!options.quiet;
   const log = (s: string) => { if (!quiet) console.log(s); };
   const warn = (s: string) => { if (!quiet) console.warn(s); };
-  const write = (s: string) => { if (!quiet) process.stdout.write(s); };
 
   const summary: SyncSummary = {
     created: [],
@@ -127,8 +128,33 @@ export async function runSync(
     resolutions: [],
   };
 
-  write(chalk.dim(`Querying ${scope.database_title ?? "database"}... `));
-  const pages = await client.queryDataSource(scope.data_source_id);
+  if (scope.sources.length === 0) {
+    return summary;
+  }
+
+  // Iterate every configured source. Each source's pages are scoped to
+  // its data_source_id; the manifest carries source_key per entry so
+  // we know which entries are in scope at each step.
+  for (const source of scope.sources) {
+    await runSyncForSource(client, scope, source, summary, options, { log, warn, quiet });
+  }
+  return summary;
+}
+
+async function runSyncForSource(
+  client: NotionClient,
+  scope: Scope,
+  source: Source,
+  summary: SyncSummary,
+  options: RunSyncOptions,
+  io: { log: (s: string) => void; warn: (s: string) => void; quiet: boolean },
+): Promise<void> {
+  const { log, warn, quiet } = io;
+  const write = (s: string) => { if (!quiet) process.stdout.write(s); };
+
+  const sourceLabel = scope.sources.length === 1 ? "" : ` ${chalk.dim(`[${source.key}]`)}`;
+  write(chalk.dim(`Querying ${source.name}${sourceLabel}... `));
+  const pages = await client.queryDataSource(source.data_source_id);
   log(chalk.green(`✓`) + chalk.dim(` ${pages.length} pages`));
 
   // Derive name + property hash without fetching block content.
@@ -147,95 +173,70 @@ export async function runSync(
     );
   }
 
-  // Load manifest, but only honour it if it belongs to the current DB.
-  // Otherwise treat as fresh: we don't want a manifest from a previous
-  // database to drive deletions against locals OR fake push-drift.
   const manifestPath = MANIFEST_FILE;
   const contentRoot = SKILLS_STORE;
-  const onDiskManifest = await readManifest(manifestPath);
-  const dbChanged =
-    !!onDiskManifest && onDiskManifest.database_id !== scope.database_id;
-  if (dbChanged) {
-    log(
-      chalk.dim(
-        `Configured database changed since last sync — local skills will be preserved.`,
-      ),
-    );
-  }
+  const defaultSourceKey =
+    defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
   const oldManifest =
-    onDiskManifest && !dbChanged
-      ? onDiskManifest
-      : emptyManifest(scope.database_id, scope.data_source_id);
+    (await readManifest(manifestPath, defaultSourceKey)) ?? emptyManifest();
 
-  // Apply renames before computing the diff: stable page_id is the
-  // ground truth, so a title change in Notion translates to a renamed
-  // local directory + symlinks + manifest entry. Without this step
-  // the renamed skill would slip out of `trackedNames` (its old slug
-  // doesn't match the new slug) and sync would treat it as a brand
-  // new "available" page plus a stale "draft" on disk.
-  const renameOps = detectRenames(oldManifest, pages);
-  const renameOutcomes = renameOps.length
-    ? await applyRenames(renameOps, oldManifest, contentRoot, scope.targets)
-    : [];
-  for (const o of renameOutcomes) {
-    if (o.status === "renamed") {
+  // Renames within this source: page_id → new source_slug. We don't
+  // touch the on-disk dir or symlinks (local_slug is pinned for muscle
+  // memory), only the manifest's source_slug field.
+  const renameOps = detectRenames(oldManifest, source.key, pages);
+  if (renameOps.length > 0) {
+    applyRenames(oldManifest, renameOps);
+    for (const op of renameOps) {
       log(
         chalk.cyan(
-          `↪ ${o.op.oldSlug} → ${o.op.newSlug} ${chalk.dim("(renamed in Notion)")}`,
-        ),
-      );
-    } else if (o.status === "refused") {
-      const reason =
-        o.reason.kind === "collision-manifest"
-          ? `target slug "${o.reason.conflictWith}" is already in use`
-          : `target dir "${o.reason.path}" already exists locally`;
-      warn(
-        chalk.yellow(
-          `Refusing rename ${o.op.oldSlug} → ${o.op.newSlug}: ${reason}`,
+          `↪ ${op.oldSourceSlug} → ${op.newSourceSlug} ${chalk.dim(`(renamed in Notion; local '${op.localSlug}' stays)`)}`,
         ),
       );
     }
   }
 
   // App-store rule: sync only operates on skills the user has installed
-  // (i.e. has a manifest entry). New pages in Notion appear in `list`
-  // and have to be explicitly `install`-ed.
+  // for THIS source. Tracked entries are those whose source_key matches.
   //
   // Caller exception: `extraFetchIds` lets publish-style flows include
   // a page that was JUST uploaded (and therefore not in the manifest
   // yet) in the pull phase, so we round-trip through Notion's
   // normalisation and create the manifest entry for it.
-  const trackedNames = new Set(Object.keys(oldManifest.skills));
-  const extraFetchIds = options.extraFetchIds ?? new Set<string>();
-  // Renamed pages need to be refetched so the SKILL.md frontmatter
-  // (which encodes the new slug as `name:`) gets rewritten on disk.
-  for (const o of renameOutcomes) {
-    if (o.status === "renamed") extraFetchIds.add(o.op.pageId);
+  const trackedSourceSlugs = new Set<string>();
+  const localSlugBySourceSlug = new Map<string, string>();
+  for (const [localSlug, entry] of Object.entries(oldManifest.skills)) {
+    if (entry.source_key !== source.key) continue;
+    trackedSourceSlugs.add(entry.source_slug);
+    localSlugBySourceSlug.set(entry.source_slug, localSlug);
   }
+  const extraFetchIds = options.extraFetchIds ?? new Set<string>();
   const kept = summaries
     .filter((s) => !colliding.has(s.name))
-    .filter((s) => trackedNames.has(s.name) || extraFetchIds.has(s.id));
+    .filter((s) => trackedSourceSlugs.has(s.name) || extraFetchIds.has(s.id));
 
   const diff = diffManifest(
     oldManifest,
     kept.map((k) => ({
       name: k.name,
+      source_key: source.key,
       pageId: k.id,
       lastEditedTime: k.lastEditedTime,
       propsHash: k.propsHash,
     })),
+    new Set([source.key]),
   );
 
   // Multi-file skills can't trust the parent's last_edited_time as a
   // change signal — Notion doesn't always bump it when only a child
   // page is edited. Force-include every tracked multi-file skill in
   // the refetch set so child-only edits are caught on every sync.
-  for (const [name, entry] of Object.entries(oldManifest.skills)) {
+  for (const [localSlug, entry] of Object.entries(oldManifest.skills)) {
+    if (entry.source_key !== source.key) continue;
     if ((entry.files?.length ?? 0) === 0) continue;
-    const summary = kept.find((k) => k.name === name);
+    const summary = kept.find((k) => k.name === entry.source_slug);
     if (summary && !diff.toFetch.includes(summary.id)) {
       diff.toFetch.push(summary.id);
-      const idx = diff.unchanged.indexOf(name);
+      const idx = diff.unchanged.indexOf(localSlug);
       if (idx >= 0) diff.unchanged.splice(idx, 1);
     }
   }
@@ -311,20 +312,18 @@ export async function runSync(
   }
 
   // ---- Build next manifest from old, layer changes --------------------
-  const nextManifest: Manifest = {
-    version: 1,
-    database_id: scope.database_id,
-    data_source_id: scope.data_source_id,
-    last_synced_at: new Date().toISOString(),
-    hash_v: HASH_V,
-    skills: { ...oldManifest.skills },
-  };
+  // We mutate `oldManifest.skills` in place across iterations because
+  // the outer loop runs once per source — each call accumulates its
+  // changes into the shared manifest object.
+  const nextManifest: Manifest = oldManifest;
+  nextManifest.last_synced_at = new Date().toISOString();
+  nextManifest.hash_v = HASH_V;
 
   // Approved removals get dropped from manifest + central store + target
   // symlinks. Declined removals get dropped from MANIFEST only — the
   // central-store dirs and symlinks stay so the user keeps the content.
-  for (const name of diff.toRemove) {
-    delete nextManifest.skills[name];
+  for (const localSlug of diff.toRemove) {
+    delete nextManifest.skills[localSlug];
   }
 
   // ---- Pull phase ------------------------------------------------------
@@ -362,18 +361,28 @@ export async function runSync(
       properties: skill.properties,
       body: skill.body,
     });
-    const skillName = skill.properties.name;
-    const skillDir = join(contentRoot, skillName);
+    const sourceSlug = skill.properties.name;
+    // Look up existing manifest entry for this page_id (preserves
+    // local_slug across re-fetches and across renames). New entries
+    // — only ever created via extraFetchIds (publish round-trip) —
+    // adopt source_slug as their initial local_slug.
+    const existing = Object.entries(nextManifest.skills).find(
+      ([, e]) => e.source_key === source.key && e.page_id === skill.pageId,
+    );
+    const localSlug = existing ? existing[0]! : sourceSlug;
+    const skillDir = join(contentRoot, localSlug);
     await mkdir(skillDir, { recursive: true });
     await writeFile(join(skillDir, "SKILL.md"), md, "utf8");
     await materializeFiles(skillDir, skill.files);
 
-    const wasNew = !oldManifest.skills[skillName];
-    if (wasNew) summary.created.push(skillName);
-    else summary.updated.push(skillName);
+    const wasNew = !existing;
+    if (wasNew) summary.created.push(localSlug);
+    else summary.updated.push(localSlug);
 
     const matchingSummary = kept.find((k) => k.id === skill.pageId);
-    nextManifest.skills[skillName] = {
+    nextManifest.skills[localSlug] = {
+      source_key: source.key,
+      source_slug: sourceSlug,
       page_id: skill.pageId,
       last_edited_time: skill.lastEditedTime,
       props_hash: matchingSummary?.propsHash ?? "",
@@ -383,58 +392,60 @@ export async function runSync(
     };
 
     const mark = wasNew ? chalk.green("+") : chalk.cyan("↓");
-    log(`  ${mark} ${skillName}`);
+    log(`  ${mark} ${localSlug}`);
   }
 
   // ---- Backfill local_hash for skills the manifest already tracked ----
   //
   // After this loop runs, every entry the user's local matches what we
-  // last wrote — so re-hash each on-disk SKILL.md and store. This catches
-  // legacy manifests (no local_hash) AND skills that didn't need a pull
-  // this round but should still get their hash recorded.
-  for (const [name, entry] of Object.entries(nextManifest.skills)) {
+  // last wrote — so re-hash each on-disk SKILL.md and store. Scope to
+  // entries belonging to this source so we don't keep retrying on
+  // sources we haven't synced yet.
+  for (const [localSlug, entry] of Object.entries(nextManifest.skills)) {
+    if (entry.source_key !== source.key) continue;
     if (entry.local_hash !== undefined) continue;
-    const file = join(contentRoot, name, "SKILL.md");
+    const file = join(contentRoot, localSlug, "SKILL.md");
     if (!existsSync(file)) continue;
     try {
       const raw = await readFile(file, "utf8");
-      nextManifest.skills[name] = { ...entry, local_hash: hashContent(raw) };
+      nextManifest.skills[localSlug] = { ...entry, local_hash: hashContent(raw) };
     } catch {
       // Read failure: leave local_hash unset so next sync retries.
     }
   }
   // Skills declined for removal from manifest may have stale local_hash
   // pointing at a now-different file. Drop the field so next sync rehashes.
-  for (const name of diff.toRemove) {
-    if (approvedRemovals.includes(name)) continue;
-    if (nextManifest.skills[name]) {
-      const { local_hash: _drop, ...rest } = nextManifest.skills[name];
-      nextManifest.skills[name] = rest as Manifest["skills"][string];
+  for (const localSlug of diff.toRemove) {
+    if (approvedRemovals.includes(localSlug)) continue;
+    if (nextManifest.skills[localSlug]) {
+      const { local_hash: _drop, ...rest } = nextManifest.skills[localSlug];
+      nextManifest.skills[localSlug] = rest as Manifest["skills"][string];
     }
   }
 
   // ---- Approved removals from disk ------------------------------------
-  for (const name of approvedRemovals) {
-    const skillDir = join(contentRoot, name);
+  for (const localSlug of approvedRemovals) {
+    const skillDir = join(contentRoot, localSlug);
     if (existsSync(skillDir)) {
       await rm(skillDir, { recursive: true, force: true });
     }
-    summary.removed.push(name);
+    summary.removed.push(localSlug);
   }
 
   // ---- Reconcile target dirs ------------------------------------------
   const targets = targetsForKeys(scope.targets);
   for (const t of targets) {
-    for (const name of Object.keys(nextManifest.skills)) {
-      const real = join(contentRoot, name);
-      const link = targetSkillPath(t, name);
+    for (const [localSlug, entry] of Object.entries(nextManifest.skills)) {
+      if (entry.source_key !== source.key) continue;
+      const real = join(contentRoot, localSlug);
+      const link = targetSkillPath(t, localSlug);
       const result = await ensureSymlink(real, link);
       if (result === "skipped") {
-        summary.conflicts.push({ name, target: link });
+        summary.conflicts.push({ name: localSlug, target: link });
       }
     }
-    for (const name of approvedRemovals) {
-      const link = targetSkillPath(t, name);
+    for (const localSlug of approvedRemovals) {
+      const link = targetSkillPath(t, localSlug);
       await removeSymlink(link);
     }
   }
@@ -442,24 +453,23 @@ export async function runSync(
   // Compute unchanged for the summary AFTER pull so the count reflects
   // only "neither side changed AND not force-pulled" entries.
   const touchedPageIds = new Set(toFetch.map((k) => k.id));
-  summary.unchanged = diff.unchanged.filter((name) => {
-    const entry = nextManifest.skills[name];
-    if (entry && touchedPageIds.has(entry.page_id)) return false;
-    return true;
-  });
+  for (const localSlug of diff.unchanged) {
+    const entry = nextManifest.skills[localSlug];
+    if (entry && !touchedPageIds.has(entry.page_id)) {
+      summary.unchanged.push(localSlug);
+    }
+  }
 
-  // Surface drift reminders at the end, after the pull phase, so they
-  // show up on the same screen as the rest of the summary.
-  for (const name of localDriftReminders) {
+  // Surface drift reminders at the end, after the pull phase.
+  for (const localSlug of localDriftReminders) {
     log(
       chalk.yellow(
-        `↑ ${name}: you have local edits — run \`notion-skills publish ${name}\` to share them with your team.`,
+        `↑ ${localSlug}: you have local edits — run \`notion-skills publish ${localSlug}\` to share them with your team.`,
       ),
     );
   }
 
   await writeManifest(manifestPath, nextManifest);
-  return summary;
 }
 
 interface PageSummary {

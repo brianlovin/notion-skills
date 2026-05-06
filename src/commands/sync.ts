@@ -18,7 +18,11 @@ export async function syncCommand(): Promise<void> {
     );
   }
 
-  console.log(chalk.bold(`\nSyncing ${scope.database_title ?? "database"}`));
+  const label =
+    scope.sources.length === 1
+      ? scope.sources[0]!.name
+      : `${scope.sources.length} sources`;
+  console.log(chalk.bold(`\nSyncing ${label}`));
   const summary = await runSync(scope);
   printSummary(summary);
 }

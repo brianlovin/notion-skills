@@ -11,7 +11,6 @@ import {
 } from "../convert.js";
 import {
   type Manifest,
-  hashContent,
   readManifest,
   writeManifest,
 } from "../manifest.js";
@@ -32,27 +31,28 @@ import { parseSkillFile } from "../migrate.js";
 import { SCHEMA, notionPropsForSkill } from "../schema.js";
 import { getScope } from "../scope.js";
 import { startTask } from "./_progress.js";
+import { type Source, defaultSource, findByKey } from "../sources.js";
+import { pickSource } from "./_resolve.js";
 
 interface PublishOptions {
   all?: boolean;
   yes?: boolean;
+  source?: string;
 }
 
 /**
  * Push local skills to the workspace skill store.
  *
- * Two flavors of push, both handled by this verb:
- *   - **First-time publish** (no manifest entry): create a new Notion
- *     page. Routes through `migrateCommand` which already does the
- *     create-page + symlink-fanout dance.
+ * Three flavors of push, all routed through this verb:
+ *   - **First-time publish** (no manifest entry, local SKILL.md exists):
+ *     create a new Notion page in the chosen source. Source picker
+ *     fires when 2+ sources exist and `--source` is not set.
  *   - **Update publish** (manifest entry exists): PATCH the existing
- *     Notion page with the local SKILL.md content. Re-fetches after
- *     so local matches Notion's normalised version.
- *
- * Modes:
- *   - `publish <slug...>` — explicit per-slug push.
- *   - `publish --all` — every local skill: drafts (no manifest entry)
- *     + installed skills with local edits.
+ *     Notion page. Re-publishes to the entry's recorded source — never
+ *     prompts. `--source` is ignored here.
+ *   - **Notion-side draft** (page exists in Notion with Published=false,
+ *     no local presence): flip Published=true. Search scoped to the
+ *     picked source.
  */
 export async function publishCommand(
   slugs: string[],
@@ -73,19 +73,12 @@ export async function publishCommand(
     throw new Error("No scope configured. Run `notion-skills init` first.");
   }
 
-  const manifest = await readManifest(MANIFEST_FILE);
-  const trackedNames = new Set(
-    manifest ? Object.keys(manifest.skills) : [],
-  );
+  const defaultKey =
+    defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
+  const manifest = await readManifest(MANIFEST_FILE, defaultKey);
+  const trackedNames = new Set(manifest ? Object.keys(manifest.skills) : []);
 
   if (slugs.length > 0) {
-    // Three paths a slug can take:
-    //   1. Installed (manifest entry exists)        → pushUpdates
-    //   2. Local draft (central-store dir, no entry)→ migrateCommand
-    //   3. Notion-side draft (page exists w/ Published=false, no local
-    //      presence)                                → flip Published=true
-    // Anything that doesn't match any of the three is a typo / wrong
-    // slug; we error.
     const updateSlugs = slugs.filter((s) => trackedNames.has(s));
     const localDraftSlugs = slugs.filter(
       (s) =>
@@ -96,53 +89,71 @@ export async function publishCommand(
       (s) => !trackedNames.has(s) && !existsSync(join(SKILLS_STORE, s, "SKILL.md")),
     );
 
-    // For unresolved slugs, look them up in Notion as potential
-    // Notion-side drafts. One query covers all of them.
-    const notionDraftSlugs: { slug: string; pageId: string }[] = [];
+    // For unresolved slugs, search Notion as potential Notion-side drafts.
+    // Tag/source semantics differ per source, so this is scoped via the
+    // picker (uses default unless --source is set).
+    const notionDraftSlugs: { slug: string; pageId: string; source: Source }[] = [];
     const stillMissing: string[] = [];
     if (unresolved.length > 0) {
       await assertNtnInstalled();
       const client = new NotionClient();
-      const pages = await client.queryDataSource(scope.data_source_id);
+      const draftSource = await pickSource(opts.source, scope);
+      const pages = await client.queryDataSource(draftSource.data_source_id);
       const wantedSet = new Set(unresolved);
-      const found = new Map<string, string>(); // slug → pageId of a draft match
+      const found = new Map<string, string>(); // slug → pageId
       for (const page of pages) {
         if (page.archived || page.in_trash) continue;
         const title = readTitle(page.properties);
         if (!title) continue;
         const pageSlug = slugify(title);
         if (!wantedSet.has(pageSlug)) continue;
-        // Only treat as "publishable from CLI" if it's actually a draft.
-        // A non-draft slug that's neither installed nor local is a state
-        // we can't fix from the CLI — surface it as missing.
         if (!readCheckbox(page.properties, "Published")) {
           found.set(pageSlug, page.id);
         }
       }
       for (const slug of unresolved) {
         const pageId = found.get(slug);
-        if (pageId) notionDraftSlugs.push({ slug, pageId });
+        if (pageId) notionDraftSlugs.push({ slug, pageId, source: draftSource });
         else stillMissing.push(slug);
       }
     }
 
     if (stillMissing.length > 0) {
       throw new Error(
-        `Cannot publish: ${stillMissing.join(", ")} ${stillMissing.length === 1 ? "is" : "are"} not in the central store and not a draft in Notion.\n` +
+        `Cannot publish: ${stillMissing.join(", ")} ${stillMissing.length === 1 ? "is" : "are"} not in the central store and not a draft in any source.\n` +
           `Run \`notion-skills gen\` to create a draft locally, or check \`notion-skills list --drafts\` for what's available.`,
       );
     }
 
     if (updateSlugs.length > 0 && manifest) {
-      await pushUpdates(scope, manifest, updateSlugs);
+      // Group by source: each entry knows its own source from manifest.
+      const bySource = new Map<string, string[]>();
+      for (const slug of updateSlugs) {
+        const key = manifest.skills[slug]!.source_key;
+        let bag = bySource.get(key);
+        if (!bag) bySource.set(key, (bag = []));
+        bag.push(slug);
+      }
+      for (const [sourceKey, slugsForSource] of bySource) {
+        const source = findByKey(scope.sources, sourceKey);
+        if (!source) {
+          console.log(
+            chalk.yellow(
+              `! Skipping ${slugsForSource.length} skills from unknown source "${sourceKey}". Configure it via \`source add\` or \`source rename\`.`,
+            ),
+          );
+          continue;
+        }
+        await pushUpdates(source, manifest, slugsForSource);
+      }
     }
     if (localDraftSlugs.length > 0) {
-      await migrateCommand({ yes: true, only: localDraftSlugs });
+      const target = await pickSource(opts.source, scope);
+      await migrateCommand({ yes: true, only: localDraftSlugs, source: target.key });
     }
     if (notionDraftSlugs.length > 0) {
       await flipPublishedForDrafts(notionDraftSlugs);
     }
-
     return;
   }
 
@@ -150,12 +161,24 @@ export async function publishCommand(
   if (manifest) {
     const drifted = await detectDriftedInstalled(manifest);
     if (drifted.length > 0) {
-      await pushUpdates(scope, manifest, drifted);
+      // Group by source.
+      const bySource = new Map<string, string[]>();
+      for (const slug of drifted) {
+        const key = manifest.skills[slug]!.source_key;
+        let bag = bySource.get(key);
+        if (!bag) bySource.set(key, (bag = []));
+        bag.push(slug);
+      }
+      for (const [sourceKey, slugsForSource] of bySource) {
+        const source = findByKey(scope.sources, sourceKey);
+        if (!source) continue;
+        await pushUpdates(source, manifest, slugsForSource);
+      }
     }
   }
-  // migrate handles creating new pages for drafts (skills in central
-  // store with no manifest entry).
-  await migrateCommand({ yes: opts.yes });
+  // For local drafts, route through migrate. Picks a single source.
+  const target = await pickSource(opts.source, scope);
+  await migrateCommand({ yes: opts.yes, source: target.key });
   console.log(chalk.dim("\nRun `notion-skills list` to verify."));
 }
 
@@ -165,7 +188,7 @@ export async function publishCommand(
  * to capture Notion's normalised formatting and update the manifest.
  */
 async function pushUpdates(
-  scope: { data_source_id: string },
+  source: Source,
   manifest: Manifest,
   slugs: string[],
 ): Promise<void> {
@@ -174,14 +197,13 @@ async function pushUpdates(
 
   console.log(
     chalk.bold(
-      `Publishing ${slugs.length} ${slugs.length === 1 ? "update" : "updates"}:`,
+      `Publishing ${slugs.length} ${slugs.length === 1 ? "update" : "updates"} → ${source.key}:`,
     ),
   );
 
-  // Parse all locals first so we can aggregate schema/option needs and
-  // do a single PATCH for new columns / select options.
   interface Parsed {
-    name: string;
+    localSlug: string;
+    sourceSlug: string;
     pageId: string;
     body: string;
     properties: Record<string, unknown>;
@@ -190,29 +212,30 @@ async function pushUpdates(
   const parsed: Parsed[] = [];
   const failed: string[] = [];
 
-  for (const slug of slugs) {
-    const dir = join(SKILLS_STORE, slug);
+  for (const localSlug of slugs) {
+    const dir = join(SKILLS_STORE, localSlug);
     const file = join(dir, "SKILL.md");
-    const result = await parseSkillFile(file, dir, file, slug);
+    const result = await parseSkillFile(file, dir, file, localSlug);
     if ("error" in result) {
-      failed.push(slug);
+      failed.push(localSlug);
       console.log(
-        `  ${chalk.red("✗")} ${slug} ${chalk.dim(`(${result.error})`)}`,
+        `  ${chalk.red("✗")} ${localSlug} ${chalk.dim(`(${result.error})`)}`,
       );
       continue;
     }
-    const entry = manifest.skills[slug]!;
+    const entry = manifest.skills[localSlug]!;
     const files = await readLocalSkillFiles(dir);
     const unsupported = files.filter((f) => f.kind === "unsupported");
     if (unsupported.length > 0) {
       console.log(
         chalk.yellow(
-          `  ⚠ ${slug}: ${unsupported.length} unsupported file ${unsupported.length === 1 ? "type" : "types"} (${unsupported.map((f) => f.path).join(", ")}) — skipping. Binary / unknown extensions are not yet supported.`,
+          `  ⚠ ${localSlug}: ${unsupported.length} unsupported file ${unsupported.length === 1 ? "type" : "types"} (${unsupported.map((f) => f.path).join(", ")}) — skipping.`,
         ),
       );
     }
     parsed.push({
-      name: slug,
+      localSlug,
+      sourceSlug: entry.source_slug,
       pageId: entry.page_id,
       body: result.skill.body,
       properties: result.skill.properties as unknown as Record<string, unknown>,
@@ -222,8 +245,6 @@ async function pushUpdates(
 
   if (parsed.length === 0) return;
 
-  // Aggregate schema + select-option needs across all updates so we
-  // make at most one PATCH for each.
   const neededProps = new Set<string>();
   const selectValues = new Map<string, Set<string>>();
   for (const p of parsed) {
@@ -242,30 +263,21 @@ async function pushUpdates(
     }
   }
   if (neededProps.size > 0) {
-    await client.upgradeSchema(scope.data_source_id, { only: neededProps });
+    await client.upgradeSchema(source.data_source_id, { only: neededProps });
   }
   if (selectValues.size > 0) {
-    await client.ensureSelectOptions(scope.data_source_id, selectValues);
+    await client.ensureSelectOptions(source.data_source_id, selectValues);
   }
 
-  // Snapshot the data source's columns once per batch so the metadata
-  // round-trip can match frontmatter `metadata.<key>` against existing
-  // columns. Keys without a matching column are silently skipped (no
-  // auto-creation from metadata — user adds columns intentionally).
-  const dataSource = await client.getDataSource(scope.data_source_id);
+  const dataSource = await client.getDataSource(source.data_source_id);
   const existingColumns = new Set(Object.keys(dataSource.properties));
 
-  // Push each.
-  const pushed: { name: string; pageId: string }[] = [];
+  const pushed: { localSlug: string; sourceSlug: string; pageId: string }[] = [];
   for (const p of parsed) {
-    const task = startTask(p.name);
+    const task = startTask(p.localSlug);
     try {
       await client.updateSkillPageProperties(
         p.pageId,
-        // Running `publish` is an explicit "ship it" gesture — always
-        // ensures Published=true. Skills installed from a Notion-side
-        // draft and then edited locally publish forward, not back into
-        // draft state. (Path 2 of publish; mirrors paths 1 + 3.)
         { ...p.properties, published: true } as never,
         existingColumns,
       );
@@ -273,17 +285,15 @@ async function pushUpdates(
         await ntnSetPageMarkdown(p.pageId, p.body);
       }
       await upsertSkillFilePages(client, ntnSetPageMarkdown, p.pageId, p.files);
-      pushed.push({ name: p.name, pageId: p.pageId });
+      pushed.push({ localSlug: p.localSlug, sourceSlug: p.sourceSlug, pageId: p.pageId });
       task.done();
     } catch (err) {
-      failed.push(p.name);
+      failed.push(p.localSlug);
       task.fail((err as Error).message.split("\n")[0]);
     }
   }
 
-  // Round-trip: refetch each pushed page to capture Notion's normalised
-  // version, write back to central store, and update the manifest with
-  // the fresh last_edited_time / props_hash / local_hash.
+  // Round-trip: refetch and update manifest entries.
   const nextManifest: Manifest = {
     ...manifest,
     last_synced_at: new Date().toISOString(),
@@ -299,10 +309,12 @@ async function pushUpdates(
         properties: converted.skill.properties,
         body: converted.skill.body,
       });
-      const dir = join(SKILLS_STORE, p.name);
+      const dir = join(SKILLS_STORE, p.localSlug);
       await mkdir(dir, { recursive: true });
       await writeFile(join(dir, "SKILL.md"), md, "utf8");
-      nextManifest.skills[p.name] = {
+      nextManifest.skills[p.localSlug] = {
+        source_key: source.key,
+        source_slug: converted.skill.properties.name,
         page_id: p.pageId,
         last_edited_time: converted.skill.lastEditedTime,
         props_hash: hashBehaviorProperties(fresh),
@@ -314,7 +326,7 @@ async function pushUpdates(
         files: converted.skill.files.map((f) => f.path).sort(),
       };
     } catch {
-      // Refresh failure is non-fatal; the next sync reconciles.
+      // Refresh failure is non-fatal.
     }
   }
   await writeManifest(MANIFEST_FILE, nextManifest);
@@ -334,14 +346,8 @@ async function pushUpdates(
   }
 }
 
-/**
- * Path-3 publish: the user passed a slug that resolves to a Notion-side
- * draft (page exists with Published=false, no local presence). Flip the
- * Published checkbox to true. No body upload, no manifest entry — the
- * skill stays remote-only until someone explicitly `install`s it.
- */
 async function flipPublishedForDrafts(
-  drafts: { slug: string; pageId: string }[],
+  drafts: { slug: string; pageId: string; source: Source }[],
 ): Promise<void> {
   const client = new NotionClient();
   console.log(
@@ -350,7 +356,7 @@ async function flipPublishedForDrafts(
     ),
   );
   for (const d of drafts) {
-    const task = startTask(d.slug);
+    const task = startTask(`${d.slug} ${chalk.dim(`[${d.source.key}]`)}`);
     try {
       await client.setPublished(d.pageId, true);
       task.done();
@@ -366,21 +372,15 @@ async function flipPublishedForDrafts(
   );
 }
 
-/**
- * Walk the manifest and return slugs whose on-disk content has drifted
- * from the recorded `local_hash`. The hash covers the full skill dir
- * (SKILL.md + every sibling file), so editing a sibling, adding a new
- * file, or deleting an existing one all show up as drift.
- */
 async function detectDriftedInstalled(manifest: Manifest): Promise<string[]> {
   const drifted: string[] = [];
-  for (const [name, entry] of Object.entries(manifest.skills)) {
+  for (const [localSlug, entry] of Object.entries(manifest.skills)) {
     if (entry.local_hash === undefined) continue;
-    const skillDir = join(SKILLS_STORE, name);
+    const skillDir = join(SKILLS_STORE, localSlug);
     if (!existsSync(join(skillDir, "SKILL.md"))) continue;
     try {
       const currentHash = await hashLocalSkillDir(skillDir);
-      if (currentHash !== entry.local_hash) drifted.push(name);
+      if (currentHash !== entry.local_hash) drifted.push(localSlug);
     } catch {
       // unreadable; skip
     }

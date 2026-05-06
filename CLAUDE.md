@@ -1,6 +1,6 @@
 # notion-skills
 
-App-store-style CLI for AI coding agent skills. A Notion database is the workspace skill store; users `install` what they want, `publish` what they author, `sync` to keep installed skills up to date. See [README](README.md) for the user-facing docs and command reference.
+App-store-style CLI for AI coding agent skills. Each configured Notion database is a "source"; users link 1+ sources, `install` what they want from any of them, `publish` to a chosen source, `sync` to keep everything fresh. See [README](README.md) for the user-facing docs and command reference.
 
 ## Rules
 

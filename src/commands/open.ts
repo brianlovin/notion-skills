@@ -60,7 +60,10 @@ export async function openCommand(
   // Drafts can't be opened in Notion (they don't exist there yet) —
   // point the user at --local.
   if (modes.length === 0) {
-    const manifest = await readManifest(MANIFEST_FILE);
+    const { defaultSource } = await import("../sources.js");
+    const defaultKey =
+      defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
+    const manifest = await readManifest(MANIFEST_FILE, defaultKey);
     const entry = manifest?.skills[slug];
     let pageId = entry?.page_id;
 
@@ -70,7 +73,12 @@ export async function openCommand(
           `${slug} is a local draft — there's no Notion page yet. Open the file with \`notion-skills open ${slug} --local\` (or publish first).`,
         );
       }
-      const found = await findPageIdInStore(scope.data_source_id, slug);
+      // Search every configured source for a matching slug.
+      let found: string | null = null;
+      for (const s of scope.sources) {
+        found = await findPageIdInStore(s.data_source_id, slug);
+        if (found) break;
+      }
       if (!found) {
         throw new Error(
           `Skill "${slug}" not found. Run \`notion-skills list\` to see what's in the store, or check the slug.`,

@@ -11,6 +11,7 @@ import { findTargetByKey, KNOWN_TARGETS } from "../known-targets.js";
 import { NotionClient } from "../notion.js";
 import { SCHEMA } from "../schema.js";
 import { detectSlugCollisions } from "../slug-collisions.js";
+import { type Source, defaultSource } from "../sources.js";
 
 interface DoctorOptions {
   fix?: boolean;
@@ -32,7 +33,7 @@ export async function doctorCommand(opts: DoctorOptions): Promise<void> {
 
   // 2. Scope
   const scope = await getScope();
-  if (!scope) {
+  if (!scope || scope.sources.length === 0) {
     checks.push({
       status: "fail",
       label: "No scope configured",
@@ -43,14 +44,16 @@ export async function doctorCommand(opts: DoctorOptions): Promise<void> {
   }
   checks.push({
     status: "ok",
-    label: `Scope: ${scope.database_title ?? scope.database_id}`,
+    label: `Scope: ${scope.sources.length} ${scope.sources.length === 1 ? "source" : "sources"} (${scope.sources.map((s) => s.key).join(", ")})`,
   });
 
-  // 3. Schema (only if ntn is authenticated)
+  // 3. Per-source schema + collision health (only if ntn is authenticated)
   const ntnOk = checks.every((c) => !c.label.startsWith("ntn") || c.status === "ok");
   if (ntnOk) {
-    checks.push(...(await checkSchema(scope)));
-    checks.push(...(await checkSlugCollisions(scope)));
+    for (const source of scope.sources) {
+      checks.push(...(await checkSchema(source)));
+      checks.push(...(await checkSlugCollisions(source)));
+    }
   }
 
   // 4. Manifest / disk consistency
@@ -117,10 +120,10 @@ async function checkNtn(): Promise<CheckResult[]> {
   return [{ status: "ok", label: `ntn ${versionLabel} authenticated` }];
 }
 
-async function checkSchema(scope: Scope): Promise<CheckResult[]> {
+async function checkSchema(source: Source): Promise<CheckResult[]> {
   try {
     const client = new NotionClient();
-    const ds = await client.getDataSource(scope.data_source_id);
+    const ds = await client.getDataSource(source.data_source_id);
     const present = new Set(Object.keys(ds.properties));
     // Hard requirements: Name + Description. Without these the store
     // can't function. Everything else is added progressively when a
@@ -132,8 +135,8 @@ async function checkSchema(scope: Scope): Promise<CheckResult[]> {
       return [
         {
           status: "fail",
-          label: `Store missing required ${missingRequired.length === 1 ? "property" : "properties"}: ${missingRequired.join(", ")}`,
-          detail: "Run `notion-skills init` against this database to repair, or recreate the store.",
+          label: `${source.key}: missing required ${missingRequired.length === 1 ? "property" : "properties"}: ${missingRequired.join(", ")}`,
+          detail: `Run \`notion-skills upgrade --source ${source.key}\` to repair.`,
         },
       ];
     }
@@ -143,27 +146,27 @@ async function checkSchema(scope: Scope): Promise<CheckResult[]> {
     return [
       {
         status: "ok",
-        label: `Store schema is healthy (Name + Description + ${optionalPresent} optional)`,
+        label: `${source.key}: schema healthy (Name + Description + ${optionalPresent} optional)`,
       },
     ];
   } catch (err) {
     return [
       {
         status: "fail",
-        label: "Couldn't reach the Notion database",
+        label: `${source.key}: couldn't reach the Notion database`,
         detail: (err as Error).message.split("\n")[0],
       },
     ];
   }
 }
 
-async function checkSlugCollisions(scope: Scope): Promise<CheckResult[]> {
+async function checkSlugCollisions(source: Source): Promise<CheckResult[]> {
   try {
     const client = new NotionClient();
-    const pages = await client.queryDataSource(scope.data_source_id);
+    const pages = await client.queryDataSource(source.data_source_id);
     const collisions = detectSlugCollisions(pages);
     if (collisions.length === 0) {
-      return [{ status: "ok", label: "No slug collisions" }];
+      return [{ status: "ok", label: `${source.key}: no slug collisions` }];
     }
     const lines = collisions.map(
       (c) => `  ${c.slug}: ${c.titles.join(", ")}`,
@@ -171,7 +174,7 @@ async function checkSlugCollisions(scope: Scope): Promise<CheckResult[]> {
     return [
       {
         status: "warn",
-        label: `${collisions.length} slug ${collisions.length === 1 ? "collision" : "collisions"}: ${collisions.map((c) => c.slug).join(", ")}`,
+        label: `${source.key}: ${collisions.length} slug ${collisions.length === 1 ? "collision" : "collisions"}: ${collisions.map((c) => c.slug).join(", ")}`,
         detail:
           [
             "Multiple Notion pages slugify to the same name and are skipped by sync / refused by install.",
@@ -184,18 +187,20 @@ async function checkSlugCollisions(scope: Scope): Promise<CheckResult[]> {
     return [
       {
         status: "warn",
-        label: "Couldn't check slug collisions",
+        label: `${source.key}: couldn't check slug collisions`,
         detail: (err as Error).message.split("\n")[0],
       },
     ];
   }
 }
 
-async function checkManifestVsDisk(_scope: Scope): Promise<CheckResult[]> {
+async function checkManifestVsDisk(scope: Scope): Promise<CheckResult[]> {
   const manifestPath = MANIFEST_FILE;
   const contentRoot = SKILLS_STORE;
+  const defaultKey =
+    defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
 
-  const manifest = await readManifest(manifestPath);
+  const manifest = await readManifest(manifestPath, defaultKey);
   if (!manifest) {
     return [
       {
@@ -247,7 +252,9 @@ async function checkManifestVsDisk(_scope: Scope): Promise<CheckResult[]> {
 }
 
 async function checkSymlinks(scope: Scope): Promise<CheckResult[]> {
-  const manifest = await readManifest(MANIFEST_FILE);
+  const defaultKey =
+    defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
+  const manifest = await readManifest(MANIFEST_FILE, defaultKey);
   if (!manifest) return [];
 
   const out: CheckResult[] = [];

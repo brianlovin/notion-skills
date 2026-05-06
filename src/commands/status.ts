@@ -7,6 +7,7 @@ import { readManifest } from "../manifest.js";
 import { KNOWN_TARGETS } from "../known-targets.js";
 import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
 import { targetsForKeys } from "../targets.js";
+import { defaultSource } from "../sources.js";
 
 export async function statusCommand(): Promise<void> {
   console.log(chalk.bold("Auth (via ntn)"));
@@ -26,24 +27,28 @@ export async function statusCommand(): Promise<void> {
   console.log("");
 
   const scope = await getScope();
-  console.log(chalk.bold("Scope"));
-  if (scope) {
-    console.log(`  database: ${scope.database_title ?? scope.database_id}`);
-    console.log(`  targets:  ${scope.targets.join(", ") || chalk.dim("(none)")}`);
+  console.log(chalk.bold("Sources"));
+  if (scope && scope.sources.length > 0) {
+    for (const s of scope.sources) {
+      const flag = s.default ? chalk.green("default ") : "";
+      console.log(`  ${flag}${chalk.bold(s.key)} ${chalk.dim(`— ${s.name}`)}`);
+    }
+    console.log(`  targets: ${scope.targets.join(", ") || chalk.dim("(none)")}`);
 
-    const manifest = await readManifest(MANIFEST_FILE);
+    const defKey = defaultSource(scope.sources)?.key ?? scope.sources[0]!.key;
+    const manifest = await readManifest(MANIFEST_FILE, defKey);
     if (manifest) {
       const count = Object.keys(manifest.skills).length;
-      console.log(`  synced:   ${count} skills, last ${manifest.last_synced_at}`);
+      console.log(`  synced: ${count} skills, last ${manifest.last_synced_at}`);
 
       const targets = targetsForKeys(scope.targets);
       for (const t of targets) {
         let ok = 0;
         let broken = 0;
         let missing = 0;
-        for (const name of Object.keys(manifest.skills)) {
-          const link = join(t.dir, name);
-          const real = join(SKILLS_STORE, name);
+        for (const localSlug of Object.keys(manifest.skills)) {
+          const link = join(t.dir, localSlug);
+          const real = join(SKILLS_STORE, localSlug);
           if (!existsSync(link) && !safeLstatExists(link)) {
             missing++;
           } else if (lstatSync(link).isSymbolicLink() && readlinkSync(link) === real) {

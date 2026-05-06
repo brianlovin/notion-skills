@@ -1,16 +1,17 @@
 ---
 name: notion-skills-usage
 description: >
-  Use the notion-skills CLI to manage AI agent skills from a Notion-backed
-  workspace store. Invoke when the user wants to install a skill from their
-  team's store, publish a local skill they authored, sync installed skills,
-  generate a new skill via their coding agent, or inspect the state of
-  installed/available/outdated/draft skills. Triggers on commands like
-  install, publish, sync, gen, list, uninstall, unpublish, doctor, init,
-  upgrade, open, import.
+  Use the notion-skills CLI to manage AI agent skills from one or more
+  Notion-backed workspace stores. Invoke when the user wants to install
+  a skill from their team's store, publish a local skill they authored,
+  sync installed skills, generate a new skill via their coding agent,
+  manage Notion sources (one database per source), or inspect the state
+  of installed/available/outdated/draft skills. Triggers on commands
+  like install, publish, sync, gen, list, uninstall, unpublish, doctor,
+  init, upgrade, open, import, source.
 type: core
 library: notion-skills
-library_version: "0.10.1"
+library_version: "0.11.0"
 sources:
   - README.md
   - CLAUDE.md
@@ -21,7 +22,7 @@ sources:
 
 # Using notion-skills
 
-`notion-skills` is an app-store-style CLI for AI coding agent skills. A Notion database is the workspace skill store; users `install` what they want, `publish` what they author, `sync` to keep installed skills fresh.
+`notion-skills` is an app-store-style CLI for AI coding agent skills. Each Notion database the user has linked is a "source"; they `install` what they want from any source, `publish` to a chosen source, `sync` keeps installed skills fresh across all sources.
 
 ## Mental model
 
@@ -50,6 +51,7 @@ The verb mapping:
 | Open a skill in Notion (or in a local editor) | `open <slug>` (or `--local`, `--with <cmd>`, `-a <App>`, `--reveal`) |
 | First-time setup | `init` |
 | Diagnose problems | `doctor [--fix]` |
+| Manage Notion sources (databases) | `source add` / `list` / `remove <key>` / `default <key>` / `rename <old> <new>` |
 
 **Key invariants:**
 
@@ -57,24 +59,38 @@ The verb mapping:
 - `gen` writes a local-first draft. The agent never publishes automatically; the user runs `publish` themselves.
 - Per-machine install state — install on laptop A doesn't propagate to laptop B without explicit install on B.
 - All Notion API access goes through the `ntn` CLI. Auth is `ntn login`.
+- **Sources** are independent Notion databases. Each has its own schema, tags, and pages. The first source linked is the default; bare commands target it. Use `<source>/<slug>` or `--source <key>` to scope explicitly.
+- **Tags are source-scoped.** `--tag` always operates on a single source (one Notion DB's tag set; semantics differ across sources).
+- **Slug auto-namespace on install collision.** Installing `personal/deploy` while `team/deploy` is installed creates `personal-deploy/` on disk. Override with `--as <name>`.
 
 ## Common workflows
+
+### Add another Notion source (database)
+
+```bash
+notion-skills source add               # interactive: link or create
+notion-skills source list              # show what's configured
+notion-skills source default <key>     # set the default source
+```
 
 ### Install a specific skill the user named
 
 ```bash
-notion-skills install <slug>
+notion-skills install <slug>           # bare; cross-source ref resolution
+notion-skills install <source>/<slug>  # qualified; targets that source
+notion-skills install <slug> --as my-deploy   # override local slug
 ```
 
-If the user gives a name that's not a valid slug, suggest running `notion-skills list` first so they can copy the exact slug. The error message from `install` will list missing slugs.
+Bare slugs that exist in multiple sources error with a "did you mean…" hint pointing to qualified refs. If the slug collides with an already-installed skill from another source, install auto-namespaces (`<source>-<slug>`) and prints what happened.
 
-### Install everything tagged X
+### Install everything tagged X (source-scoped)
 
 ```bash
-notion-skills install --tag <name>
+notion-skills install --tag <name>                 # default source
+notion-skills install --tag <name> --source team   # explicit
 ```
 
-Multiple tags = AND. `--tag a --tag b` installs only skills with both.
+Multiple tags = AND. Tags are scoped to a single source (each Notion DB has its own tag option set with its own semantics).
 
 ### Show what's installed / available / outdated
 
