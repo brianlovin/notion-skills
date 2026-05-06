@@ -198,18 +198,20 @@ test("notionPropsForSkill: metric-only props (Installs) never trigger column cre
 });
 
 // buildViewConfiguration shapes the Notion default-view PATCH payload.
-// Only properties that exist on the data source are emitted (skipping any
-// progressive columns we haven't added yet); all extant ones appear in
-// SCHEMA order with the title column frozen.
+// Only properties present on the data source are emitted; the four
+// "high-signal" columns (Name / Description / Tags / Installs) come
+// first with visible: true; everything else is included with
+// visible: false so users can flip them on per-view if they want.
+// Name + Description are frozen (frozen_column_index: 2).
 
 test("buildViewConfiguration: empty data source → empty properties", () => {
   const config = buildViewConfiguration({});
   assert.equal(config.type, "table");
   assert.deepEqual(config.properties, []);
-  assert.equal(config.frozen_column_index, 1);
+  assert.equal(config.frozen_column_index, 2);
 });
 
-test("buildViewConfiguration: only Name + Description present", () => {
+test("buildViewConfiguration: only Name + Description present (both visible-by-default)", () => {
   const config = buildViewConfiguration({
     Name: { id: "title-id" },
     Description: { id: "desc-id" },
@@ -218,23 +220,25 @@ test("buildViewConfiguration: only Name + Description present", () => {
     { property_id: "title-id", visible: true },
     { property_id: "desc-id", visible: true },
   ]);
+  assert.equal(config.frozen_column_index, 2);
 });
 
-test("buildViewConfiguration: emits properties in SCHEMA order regardless of input order", () => {
+test("buildViewConfiguration: visible-by-default columns first, others hidden", () => {
   const config = buildViewConfiguration({
     Effort: { id: "effort-id" },
     Description: { id: "desc-id" },
     Name: { id: "title-id" },
     Model: { id: "model-id" },
+    Tags: { id: "tags-id" },
+    Installs: { id: "installs-id" },
   });
-  // SCHEMA order: Name, Description, ..., Model, Effort, ...
-  const ids = config.properties.map((p) => p.property_id);
-  assert.equal(ids[0], "title-id");
-  assert.equal(ids[1], "desc-id");
-  // Model comes before Effort in SCHEMA
-  const modelIdx = ids.indexOf("model-id");
-  const effortIdx = ids.indexOf("effort-id");
-  assert.ok(modelIdx < effortIdx, "Model should sort before Effort");
+  // Visible-by-default come first in SCHEMA order: Name, Description, Tags, Installs
+  const visibleIds = config.properties.filter((p) => p.visible).map((p) => p.property_id);
+  assert.deepEqual(visibleIds, ["title-id", "desc-id", "tags-id", "installs-id"]);
+  // Hidden ones still present (so the toggle exists in Notion's UI)
+  const hiddenIds = config.properties.filter((p) => !p.visible).map((p) => p.property_id);
+  assert.ok(hiddenIds.includes("model-id"));
+  assert.ok(hiddenIds.includes("effort-id"));
 });
 
 test("buildViewConfiguration: skips properties with no id", () => {
@@ -243,10 +247,8 @@ test("buildViewConfiguration: skips properties with no id", () => {
     Description: {}, // no id — skip
     Model: { id: "model-id" },
   });
-  assert.deepEqual(
-    config.properties.map((p) => p.property_id),
-    ["title-id", "model-id"],
-  );
+  const ids = config.properties.map((p) => p.property_id);
+  assert.deepEqual(ids, ["title-id", "model-id"]);
 });
 
 test("buildViewConfiguration: ignores unknown columns the user added in Notion", () => {
@@ -255,8 +257,6 @@ test("buildViewConfiguration: ignores unknown columns the user added in Notion",
     Description: { id: "desc-id" },
     "Some Custom Column": { id: "custom-id" }, // not in SCHEMA
   });
-  assert.deepEqual(
-    config.properties.map((p) => p.property_id),
-    ["title-id", "desc-id"],
-  );
+  const ids = config.properties.map((p) => p.property_id);
+  assert.deepEqual(ids, ["title-id", "desc-id"]);
 });

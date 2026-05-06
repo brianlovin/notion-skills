@@ -70,6 +70,15 @@ export interface PropertyDef {
    * editing tags in Notion never marks a skill as "outdated."
    */
   taxonomyOnly?: boolean;
+  /**
+   * Visibility default for the table-view list of skills. The four
+   * scaffolded views (All / Popular / New / Drafts) only surface a
+   * handful of columns by default — most skill-spec properties are
+   * relevant when authoring or inspecting a single skill, not when
+   * browsing the store. Default is false; flip to true for properties
+   * users care about at-a-glance.
+   */
+  defaultVisibleInListView?: boolean;
 }
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -84,12 +93,14 @@ export const SCHEMA: PropertyDef[] = [
     notionName: "Name",
     frontmatterKey: "name",
     kind: "title",
+    defaultVisibleInListView: true,
     description: "Skill slug (page title)",
   },
   {
     notionName: "Description",
     frontmatterKey: "description",
     kind: "rich_text",
+    defaultVisibleInListView: true,
     description: "When-to-use one-liner for Claude (recommended)",
   },
   {
@@ -213,6 +224,7 @@ export const SCHEMA: PropertyDef[] = [
     options: [],
     selfHealing: true,
     taxonomyOnly: true,
+    defaultVisibleInListView: true,
     description: "Discovery tags. Self-healing — new tags auto-added on publish.",
   },
   {
@@ -224,6 +236,7 @@ export const SCHEMA: PropertyDef[] = [
     frontmatterKey: "installs",
     kind: "number",
     metricOnly: true,
+    defaultVisibleInListView: true,
     description: "Install count. Auto-incremented by `notion-skills install`.",
   },
   {
@@ -264,11 +277,20 @@ export function findPropertyByFrontmatterKey(key: string): PropertyDef | undefin
 
 /**
  * Build the `configuration` payload for a Notion table view that pins
- * Name to the left and lists every other property in SCHEMA order.
+ * Name + Description to the left, surfaces only the high-signal
+ * columns (Name / Description / Tags / Installs), and hides the rest.
  *
- * Properties not present on the data source (i.e. progressive columns
- * that haven't been added yet) are skipped — Notion would reject
- * unknown property IDs.
+ *   - Visible-by-default columns are emitted in SCHEMA order with
+ *     visible: true.
+ *   - Other present columns are still listed (so Notion's UI can
+ *     render the toggle) but with visible: false.
+ *   - Properties not present on the data source (progressive columns
+ *     that haven't been added yet) are skipped — Notion would reject
+ *     unknown property IDs.
+ *
+ * The four scaffolded views (All / Popular / New / Drafts) all use
+ * this configuration. Users can flip any column on per-view via
+ * Notion's UI without losing other view settings.
  */
 export interface ViewProperty {
   property_id: string;
@@ -284,16 +306,24 @@ export interface ViewConfiguration {
 export function buildViewConfiguration(
   propertiesByName: Record<string, { id?: string }>,
 ): ViewConfiguration {
-  const ordered: ViewProperty[] = [];
+  const visible: ViewProperty[] = [];
+  const hidden: ViewProperty[] = [];
   for (const prop of SCHEMA) {
     const found = propertiesByName[prop.notionName];
     if (!found?.id) continue;
-    ordered.push({ property_id: found.id, visible: true });
+    if (prop.defaultVisibleInListView) {
+      visible.push({ property_id: found.id, visible: true });
+    } else {
+      hidden.push({ property_id: found.id, visible: false });
+    }
   }
+  // Visible columns first (so they sort in SCHEMA order at the left),
+  // then the hidden ones. Frozen column index counts visible columns
+  // from the start: Name + Description = 2 frozen.
   return {
     type: "table",
-    properties: ordered,
-    frozen_column_index: 1,
+    properties: [...visible, ...hidden],
+    frozen_column_index: 2,
   };
 }
 

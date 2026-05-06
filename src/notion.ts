@@ -344,27 +344,35 @@ export class NotionClient {
         },
       ];
 
-      // Fire-once-at-creation semantics: if a view by name already
-      // exists we leave it alone (the user may have customised it; and
-      // PATCH validation on the Views API is stricter than POST in
-      // ways we can't reliably reproduce). New views in `desired` get
-      // POSTed; existing names are skipped.
+      // For new views: POST the full payload (sorts + filter +
+      // configuration). For existing views: PATCH only `configuration`
+      // (column visibility/order), leaving the user's sort + filter
+      // alone. PATCH on sorts has been rejecting the timestamp shape
+      // that POST silently dropped, so configuration-only PATCH side-
+      // steps the validation gap and lets us reconcile column
+      // defaults across versions.
       for (const view of desired) {
         if (view.skipIf?.()) continue;
-        if (existingByName.has(view.name)) continue;
-        const payload: Record<string, unknown> = {
-          name: view.name,
-          type: "table",
-          sorts: view.sorts,
-          configuration,
-        };
-        if (view.filter) payload.filter = view.filter;
+        const existingId = existingByName.get(view.name);
         try {
-          await this.request("POST", `/v1/views`, {
-            database_id: databaseId,
-            data_source_id: dataSourceId,
-            ...payload,
-          });
+          if (existingId) {
+            await this.request("PATCH", `/v1/views/${existingId}`, {
+              configuration,
+            });
+          } else {
+            const payload: Record<string, unknown> = {
+              name: view.name,
+              type: "table",
+              sorts: view.sorts,
+              configuration,
+            };
+            if (view.filter) payload.filter = view.filter;
+            await this.request("POST", `/v1/views`, {
+              database_id: databaseId,
+              data_source_id: dataSourceId,
+              ...payload,
+            });
+          }
         } catch (err) {
           // One view's failure shouldn't block the others.
           if (process.env.NOTION_SKILLS_DEBUG === "1") {
