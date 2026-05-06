@@ -63,7 +63,13 @@ A skill is **ready** or a **draft**. Drafts aren't yet ready for the team — th
 
 ## What's in a skill?
 
-A directory with a `SKILL.md` file. You can ship extra files alongside it (e.g. `LANGUAGE.md`, `scripts/setup.sh`); each becomes a child page on the Notion row when you publish, and lands back as a sibling file when you install.
+A directory with a `SKILL.md` file. You can ship extra files alongside it. The [Agent Skills spec](https://agentskills.io/specification) defines three optional category directories:
+
+- `scripts/` — executable code the agent runs
+- `references/` — documentation the agent loads on demand
+- `assets/` — static resources (templates, schemas, etc.)
+
+Files in spec dirs round-trip through Notion as nested sub-pages of a same-named wrapper. Files outside spec dirs become flat root-level child pages.
 
 ## Supported agents
 

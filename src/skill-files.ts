@@ -15,6 +15,42 @@
 
 export type SkillFileKind = "markdown" | "code" | "unsupported";
 
+/**
+ * Agent Skills spec category directories. Files placed in these
+ * conventional dirs round-trip through Notion as child pages of a
+ * named wrapper sub-page (per the spec's progressive-disclosure
+ * model: scripts run by the agent, references the agent loads on
+ * demand, assets the agent uses as templates).
+ *
+ * https://agentskills.io/specification#optional-directories
+ */
+export const SPEC_CATEGORY_DIRS = ["scripts", "references", "assets"] as const;
+export type SpecCategoryDir = (typeof SPEC_CATEGORY_DIRS)[number];
+
+/**
+ * Match a relative path against the spec dirs. Returns the category
+ * name + the path within it, or null if the path doesn't fall under
+ * a spec dir. Strict lowercase match — a path under "Scripts/" or
+ * "SCRIPTS/" stays as a flat root-level file.
+ */
+export function specCategoryOf(
+  path: string,
+): { category: SpecCategoryDir; pathWithinCategory: string } | null {
+  for (const cat of SPEC_CATEGORY_DIRS) {
+    const prefix = cat + "/";
+    if (path.startsWith(prefix)) {
+      const rest = path.slice(prefix.length);
+      if (rest.length === 0) continue;
+      return { category: cat, pathWithinCategory: rest };
+    }
+  }
+  return null;
+}
+
+export function isSpecCategoryName(name: string): name is SpecCategoryDir {
+  return (SPEC_CATEGORY_DIRS as readonly string[]).includes(name);
+}
+
 export interface SkillFile {
   /** Relative path from the skill directory (POSIX-style). */
   path: string;
@@ -195,6 +231,179 @@ export async function hashLocalSkillDir(
   }
   const files = await readLocalSkillFiles(skillDir);
   return hashSkillContent(skillMd, files);
+}
+
+/**
+ * Upsert a parent skill page's child pages to match a desired set of
+ * SkillFiles, applying spec category nesting:
+ *
+ *   - Files at `scripts/`, `references/`, `assets/` are nested inside
+ *     a same-named wrapper sub-page on the parent. Wrapper sub-pages
+ *     are auto-created when needed and archived when their category
+ *     becomes empty locally.
+ *   - Files outside spec dirs are direct top-level children of the
+ *     parent skill page (flat-title scheme).
+ *   - Orphan child pages (titles with no matching local file) are
+ *     archived.
+ *
+ * Caller passes a NotionClient with the methods we need. We pass a
+ * minimal interface here rather than importing NotionClient to keep
+ * skill-files.ts free of tight coupling.
+ */
+export interface UpsertClient {
+  getBlockChildren(blockId: string): Promise<
+    Array<{ id: string; type: string; [k: string]: unknown }>
+  >;
+  createChildPage(parentPageId: string, title: string): Promise<string>;
+  archivePage(pageId: string): Promise<void>;
+}
+
+export async function upsertSkillFilePages(
+  client: UpsertClient,
+  setPageMarkdown: (pageId: string, markdown: string) => Promise<void>,
+  parentPageId: string,
+  files: SkillFile[],
+): Promise<void> {
+  // Group files by category. Files in spec dirs land in their wrapper;
+  // everything else stays flat at the parent.
+  type Group = { wrapperTitle: string; files: SkillFile[] };
+  const groups = new Map<SpecCategoryDir, Group>();
+  const rootFiles: SkillFile[] = [];
+
+  for (const file of files) {
+    const cat = specCategoryOf(file.path);
+    if (cat) {
+      let g = groups.get(cat.category);
+      if (!g) {
+        g = { wrapperTitle: cat.category, files: [] };
+        groups.set(cat.category, g);
+      }
+      g.files.push({
+        ...file,
+        // Within the wrapper, the page's title is the path within the
+        // category (so "scripts/extract.py" → "extract.py" on the
+        // child of the "scripts" wrapper).
+        path: cat.pathWithinCategory,
+      });
+    } else {
+      rootFiles.push(file);
+    }
+  }
+
+  // Snapshot existing top-level children of parent.
+  const parentBlocks = await client.getBlockChildren(parentPageId);
+  const existingTopLevel = new Map<string, string>();
+  for (const block of parentBlocks) {
+    if (block.type !== "child_page") continue;
+    const cp = (block as { child_page?: { title?: string } }).child_page;
+    const title = cp?.title?.trim();
+    if (title) existingTopLevel.set(title, block.id);
+  }
+
+  // Process each spec category that has local files.
+  const desiredTopLevelTitles = new Set<string>();
+  for (const file of rootFiles) desiredTopLevelTitles.add(file.path);
+
+  for (const [category, group] of groups) {
+    desiredTopLevelTitles.add(category);
+    let wrapperId = existingTopLevel.get(category);
+    if (!wrapperId) {
+      wrapperId = await client.createChildPage(parentPageId, category);
+    }
+    await upsertChildPagesIn(
+      client,
+      setPageMarkdown,
+      wrapperId,
+      group.files,
+    );
+  }
+
+  // Empty category wrappers (existed before but now have no files
+  // locally) get archived so they don't linger.
+  for (const cat of SPEC_CATEGORY_DIRS) {
+    if (groups.has(cat)) continue;
+    const wrapperId = existingTopLevel.get(cat);
+    if (wrapperId) {
+      // Archive children first so they don't dangle. Then archive the
+      // wrapper itself.
+      const inner = await client.getBlockChildren(wrapperId);
+      for (const block of inner) {
+        if (block.type !== "child_page") continue;
+        await client.archivePage(block.id);
+      }
+      await client.archivePage(wrapperId);
+    }
+  }
+
+  // Root-level (non-spec-dir) files: upsert flat-title children.
+  await upsertChildPagesIn(
+    client,
+    setPageMarkdown,
+    parentPageId,
+    rootFiles,
+    {
+      // Don't archive top-level children that are spec category names
+      // — those are managed above and may still be valid wrappers.
+      preserveTitles: new Set([...SPEC_CATEGORY_DIRS]),
+      existingByTitle: existingTopLevel,
+    },
+  );
+}
+
+/**
+ * Lower-level helper: upserts a flat list of files as child pages of
+ * a single parent (the parent could be the skill row itself for root
+ * files or a spec category wrapper for nested files).
+ *
+ *   - opts.existingByTitle lets the caller pass in a pre-fetched list
+ *     to avoid an extra getBlockChildren call when they already have
+ *     it. When omitted, we fetch.
+ *   - opts.preserveTitles names titles that should never be archived
+ *     even if they're not in the desired set — used by the parent
+ *     pass to leave spec category wrappers alone.
+ */
+async function upsertChildPagesIn(
+  client: UpsertClient,
+  setPageMarkdown: (pageId: string, markdown: string) => Promise<void>,
+  parentId: string,
+  files: SkillFile[],
+  opts: {
+    existingByTitle?: Map<string, string>;
+    preserveTitles?: Set<string>;
+  } = {},
+): Promise<void> {
+  let existingByTitle = opts.existingByTitle;
+  if (!existingByTitle) {
+    const blocks = await client.getBlockChildren(parentId);
+    existingByTitle = new Map<string, string>();
+    for (const block of blocks) {
+      if (block.type !== "child_page") continue;
+      const cp = (block as { child_page?: { title?: string } }).child_page;
+      const title = cp?.title?.trim();
+      if (title) existingByTitle.set(title, block.id);
+    }
+  }
+
+  const desired = new Set(files.map((f) => f.path));
+
+  for (const file of files) {
+    const body = renderForChildPage(file);
+    const existingId = existingByTitle.get(file.path);
+    if (existingId) {
+      await setPageMarkdown(existingId, body);
+    } else {
+      const newId = await client.createChildPage(parentId, file.path);
+      if (body.trim()) {
+        await setPageMarkdown(newId, body);
+      }
+    }
+  }
+
+  for (const [title, id] of existingByTitle) {
+    if (desired.has(title)) continue;
+    if (opts.preserveTitles?.has(title)) continue;
+    await client.archivePage(id);
+  }
 }
 
 /**

@@ -20,8 +20,8 @@ import { readManifest } from "../manifest.js";
 import { runSync, printSummary } from "../sync.js";
 import {
   readLocalSkillFiles,
-  renderForChildPage,
   type SkillFile,
+  upsertSkillFilePages,
 } from "../skill-files.js";
 import { startTask } from "./_progress.js";
 
@@ -497,36 +497,7 @@ async function pushSkillFiles(
     );
   }
   const supported = files.filter((f) => f.kind !== "unsupported");
-
-  const blocks = await client.getBlockChildren(pageId);
-  const existingByTitle = new Map<string, string>();
-  for (const block of blocks) {
-    if (block.type !== "child_page") continue;
-    const cp = (block as { child_page?: { title?: string } }).child_page;
-    const title = cp?.title?.trim();
-    if (title) existingByTitle.set(title, block.id);
-  }
-
-  const desiredTitles = new Set(supported.map((f) => f.path));
-
-  for (const file of supported) {
-    const body = renderForChildPage(file);
-    const existingId = existingByTitle.get(file.path);
-    if (existingId) {
-      await ntnSetPageMarkdown(existingId, body);
-    } else {
-      const newId = await client.createChildPage(pageId, file.path);
-      if (body.trim()) {
-        await ntnSetPageMarkdown(newId, body);
-      }
-    }
-  }
-
-  for (const [title, id] of existingByTitle) {
-    if (!desiredTitles.has(title)) {
-      await client.archivePage(id);
-    }
-  }
+  await upsertSkillFilePages(client, ntnSetPageMarkdown, pageId, supported);
 }
 
 function timestamp(): string {

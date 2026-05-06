@@ -13,6 +13,7 @@ import {
   readTitle,
 } from "./notion.js";
 import {
+  isSpecCategoryName,
   parseFromChildPage,
   type SkillFile,
 } from "./skill-files.js";
@@ -170,6 +171,24 @@ export async function fetchPageContent(
   for (const cp of childPageBlocks) {
     const childTitle = readChildPageTitle(cp);
     if (!childTitle) continue;
+
+    if (isSpecCategoryName(childTitle)) {
+      // Spec category wrapper (scripts / references / assets):
+      // recurse into its children and surface them with the category
+      // prefix in the file path.
+      const grandchildren = await fetchBlockTree(client, cp.id);
+      for (const gc of grandchildren) {
+        if (gc.type !== "child_page") continue;
+        const gcTitle = readChildPageTitle(gc);
+        if (!gcTitle) continue;
+        const gcBlocks = await fetchBlockTree(client, gc.id);
+        const gcBody = renderBlocks(gcBlocks, 0);
+        files.push(parseFromChildPage(`${childTitle}/${gcTitle}`, gcBody));
+      }
+      continue;
+    }
+
+    // Flat root-level file (legacy / non-spec-dir path).
     const childBlocks = await fetchBlockTree(client, cp.id);
     const childBody = renderBlocks(childBlocks, 0);
     files.push(parseFromChildPage(childTitle, childBody));

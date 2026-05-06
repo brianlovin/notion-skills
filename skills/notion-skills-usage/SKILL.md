@@ -184,22 +184,28 @@ A `manifest.json` entry is what distinguishes installed from draft. Both are rea
 
 ## Multi-file skills
 
-A skill is a directory. Beyond `SKILL.md`, sibling files (e.g. `LANGUAGE.md`, `scripts/search.ts`) round-trip through Notion as child pages on the skill's row.
+A skill is a directory. Beyond `SKILL.md`, the spec defines three optional category directories that round-trip through Notion as nested sub-pages:
 
-- **Markdown** sibling files: child page body = file content verbatim.
-- **Source code** files (.ts, .py, .sh, etc.): child page body = a single fenced code block, no prose.
-- **Unsupported** file types (binary, unknown extension): publish skips with a warning.
+- `scripts/` — executable code (Python, Bash, JS, etc.)
+- `references/` — documentation the agent loads on demand
+- `assets/` — static resources (templates, schemas, lookup tables)
 
-When users ask about authoring a multi-file skill, the layout to use:
+Files placed in these dirs nest under a same-named wrapper sub-page in Notion. Files outside spec dirs are direct flat-title children of the parent skill row.
 
 ```
 my-skill/
 ├── SKILL.md
-├── LANGUAGE.md            (markdown sibling)
-└── scripts/search.ts      (code sibling, lives at scripts/search.ts on disk)
+├── LANGUAGE.md              ← root-level markdown
+├── scripts/search-icons.ts  ← nested under "scripts" wrapper in Notion
+└── references/api-spec.md   ← nested under "references" wrapper in Notion
 ```
 
-`publish` upserts the child pages. `install` / `sync` materializes them back to disk. Deleting a local sibling file and re-publishing archives the matching child page in Notion.
+Round-trip rules:
+- **Markdown** sibling files round-trip verbatim. (Caveat: a top-level `# Heading` gets absorbed into the Notion page title; H2+ survive.)
+- **Source code** files (.ts, .py, .sh, etc.) round-trip as a single fenced code block — no prose, just the source.
+- **Unsupported** file types (binary, unknown extension): `publish` skips with a warning.
+
+`publish` upserts the wrapper pages and their nested child pages. `install` / `sync` materialize everything back to disk at the correct relative paths. Deleting a local file and re-publishing archives the matching Notion sub-page.
 
 ## Drafts
 

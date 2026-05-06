@@ -24,8 +24,8 @@ import { NotionClient, readCheckbox, readTitle } from "../notion.js";
 import {
   hashLocalSkillDir,
   readLocalSkillFiles,
-  renderForChildPage,
   type SkillFile,
+  upsertSkillFilePages,
 } from "../skill-files.js";
 import { assertNtnInstalled, ntnSetPageMarkdown } from "../ntn.js";
 import { parseSkillFile } from "../migrate.js";
@@ -272,7 +272,7 @@ async function pushUpdates(
       if (p.body.trim()) {
         await ntnSetPageMarkdown(p.pageId, p.body);
       }
-      await upsertChildPages(client, p.pageId, p.files);
+      await upsertSkillFilePages(client, ntnSetPageMarkdown, p.pageId, p.files);
       pushed.push({ name: p.name, pageId: p.pageId });
       task.done();
     } catch (err) {
@@ -331,59 +331,6 @@ async function pushUpdates(
       ),
     );
     for (const name of failed) console.log(`  ${chalk.red("✗")} ${name}`);
-  }
-}
-
-/**
- * Upsert the desired set of sibling files as child pages on the
- * skill's row.
- *
- *   - Existing child page with matching title → ntnSetPageMarkdown
- *     replaces the body.
- *   - No matching child → create a new child page, then set body.
- *   - Orphans (existing child page with no matching local file) →
- *     archived, so removing a file locally + publishing actually
- *     drops the corresponding child page in Notion.
- *
- * Title matching is exact. The title carries the relative path
- * (e.g. "scripts/search.ts"); slashes are part of the title string.
- */
-async function upsertChildPages(
-  client: NotionClient,
-  parentPageId: string,
-  files: SkillFile[],
-): Promise<void> {
-  const blocks = await client.getBlockChildren(parentPageId);
-  const existingByTitle = new Map<string, string>();
-  for (const block of blocks) {
-    if (block.type !== "child_page") continue;
-    const cp = (block as { child_page?: { title?: string } }).child_page;
-    const title = cp?.title?.trim();
-    if (title) existingByTitle.set(title, block.id);
-  }
-
-  const desiredTitles = new Set(files.map((f) => f.path));
-
-  for (const file of files) {
-    const body = renderForChildPage(file);
-    const existingId = existingByTitle.get(file.path);
-    if (existingId) {
-      await ntnSetPageMarkdown(existingId, body);
-    } else {
-      const newId = await client.createChildPage(parentPageId, file.path);
-      if (body.trim()) {
-        await ntnSetPageMarkdown(newId, body);
-      }
-    }
-  }
-
-  // Orphan archival: any existing child whose title isn't in the
-  // desired set has no corresponding local file. Drop it so the Notion
-  // page reflects the local source of truth.
-  for (const [title, id] of existingByTitle) {
-    if (!desiredTitles.has(title)) {
-      await client.archivePage(id);
-    }
   }
 }
 

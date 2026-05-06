@@ -12,6 +12,14 @@ Surprising behaviors that have bitten us before. New work that touches these are
 
 `gen` hands its wrapped prompt to a coding-agent CLI (claude, codex, opencode, gemini) defined in `src/gen-agents.ts`. The agent's only job is to write a SKILL.md to `~/.notion-skills/skills/<slug>/`; **the agent never runs shell commands**. After agent exit, `gen` creates symlinks for new central-store entries — but does NOT publish. The user runs `publish` themselves. The contract is in `src/gen-prompt.ts`.
 
+## Spec category dirs (multi-file skills)
+
+The spec defines three optional dirs: `scripts/` / `references/` / `assets/`. We round-trip them as nested sub-pages: the category becomes a wrapper sub-page on the parent skill row, and files within it become children of the wrapper. Files outside spec dirs stay as flat-title children of the parent.
+
+`src/skill-files.ts:upsertSkillFilePages` is the single shared helper for the push side; both `publish` and `migrate` use it. Don't reintroduce parallel implementations.
+
+The spec category match is **strict lowercase** — a folder named `Scripts/` (capital S) won't be recognized; document this when authoring.
+
 ## Default views
 
 Fresh databases get four views scaffolded at create-time (and reconciled on `init` / `upgrade` for linked DBs): **All** (alphabetical), **Popular** (Installs descending), **New** (recent additions), **Drafts** (filter: `Published=false`). Logic in `src/notion.ts:ensureDefaultViews`. Fail-soft — Views API errors are swallowed (logged in `NOTION_SKILLS_DEBUG=1`) so users still get a working DB if their workspace blocks the endpoint.
