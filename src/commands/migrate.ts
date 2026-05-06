@@ -220,7 +220,10 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
     try {
       const pageId = await client.createSkillPage(
         scope.data_source_id,
-        c.skill.properties,
+        // Running `publish` is an explicit "ship it" gesture, so new
+        // CLI-published pages start with Published=true. Notion-side
+        // drafts (created via Notion's UI) default to false instead.
+        { ...c.skill.properties, published: true },
       );
       if (c.skill.body.trim()) {
         await ntnSetPageMarkdown(pageId, c.skill.body);

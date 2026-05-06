@@ -199,6 +199,25 @@ my-skill/
 
 `publish` upserts the child pages. `install` / `sync` materializes them back to disk. Deleting a local sibling file and re-publishing archives the matching child page in Notion.
 
+## Drafts
+
+A skill is either **ready** or a **draft**. Both kinds show the `✎` marker in `list`. Two ways a skill can be a draft:
+
+- **Local-only**: skill dir exists at `~/.notion-skills/skills/<slug>/` but no Notion row yet (gen output, hand-authored).
+- **Notion-side**: row exists in Notion but its `Published` checkbox is unchecked.
+
+`publish` always sets `Published = true`. Three paths it handles:
+
+| State the user is in | What `publish <slug>` does |
+|---|---|
+| Local draft (no Notion row) | Creates the Notion page with `Published = true` |
+| Installed (manifest entry exists) | Updates the page body / properties **and** sets `Published = true` |
+| Notion-side draft (page exists, no local presence) | Flips `Published = true`. No body upload. |
+
+`install --all` and `install --tag` skip drafts. `install <slug>` works regardless of state — if a user typed the slug, they want it.
+
+When the data source doesn't have a `Published` column, every row is treated as ready. Suggest the user run `notion-skills upgrade` (or add the column manually) to opt in to drafts.
+
 ## Slug stability
 
 The slug is derived from the page title, but identity is keyed by Notion's stable `page_id`. When a user renames a page in Notion, the next `list` or `sync` automatically migrates local state: central-store directory, every agent CLI's symlink, and the manifest entry all move to the new slug. Install count and drift hashes are preserved. The user sees `↪ old-slug → new-slug (renamed in Notion)`.

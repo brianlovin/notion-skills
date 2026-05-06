@@ -220,6 +220,7 @@ notion-skills publish <slug>   # if you want it back in the store
 | `Agent` | `agent` | select (self-healing) |
 | `Shell` | `shell` | select |
 | `Installs` | — (not round-tripped) | number |
+| `Published` | — (not round-tripped) | checkbox |
 
 **Self-healing selects/multi-selects** (`Tags`, `Model`, `Agent`) auto-add new options on publish, so any tag or model name the user types becomes a real Notion option without an upgrade step.
 
@@ -228,6 +229,34 @@ notion-skills publish <slug>   # if you want it back in the store
 **`Installs`** is a store-managed counter — incremented +1 by `notion-skills install`. It exists in Notion (so `list --sort installs` and the **Popular** view can rank by it) but never round-trips into SKILL.md frontmatter, so editing it doesn't mark a skill outdated.
 
 **`Tags`** are taxonomy-only: editing them in Notion never marks a skill outdated either, since they don't change how the model executes the skill.
+
+**`Published`** is the draft / ready gate. See [Drafts](#drafts) — also never round-tripped, so flipping it doesn't trigger drift.
+
+## Drafts
+
+A skill is either **ready** or a **draft**. Drafts are skills that aren't ready for team consumption yet — either because they're local-only (gen output, hand-authored, not yet pushed) or because they exist in Notion but the `Published` checkbox is unchecked. Both kinds appear with the `✎` marker in `list`.
+
+```
+~/.notion-skills/skills/foo/SKILL.md  →  exists locally, no Notion row     →  draft
+foo (Notion row, Published = false)   →  exists in Notion, marked unready  →  draft
+foo (Notion row, Published = true)    →  ready                            →  visible / installable by default
+```
+
+`Published` is a Notion-side checkbox. The CLI never asks you to manage it via frontmatter — set it via Notion's UI, or via `publish`.
+
+**Default behavior:**
+
+- `list` shows drafts at the bottom with `✎`. They're not hidden — you can see your own work.
+- `list --available` shows ready-and-not-installed only (no drafts).
+- `install --all` and `install --tag <name>` skip drafts. They're explicit-only.
+- `install <slug>` works on any state — if you typed it, you want it.
+- `publish` always sets `Published = true`. The verb is "publish."
+  - Local draft + `publish <slug>` → creates Notion page with `Published = true`
+  - Installed skill + `publish <slug>` → updates the page **and** ensures `Published = true`
+  - Notion-side draft + `publish <slug>` → flips `Published = true` (no body changes; the user has been editing in Notion's UI)
+- `unpublish <slug>` archives the Notion page (unchanged from before — drafts don't change this).
+
+**Backward compatibility**: if your data source doesn't have the `Published` column, every row is treated as ready. No behavior change unless you opt in. Add the column via `notion-skills upgrade` (or by hand in Notion), then mark existing rows ready in bulk.
 
 ## Multi-file skills
 

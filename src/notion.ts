@@ -28,6 +28,13 @@ export interface SkillProperties {
   shell?: string;
   /** Discovery tags (Notion multi_select). Empty / undefined means untagged. */
   tags?: string[];
+  /**
+   * Ready-for-team-consumption gate. true = published (default for new
+   * CLI-pushed pages); false / undefined = draft. The CLI never reads
+   * this from frontmatter (the property is metricOnly); it's set on
+   * page create / via `publish` and otherwise managed in Notion's UI.
+   */
+  published?: boolean;
 }
 
 export interface NotionPage {
@@ -54,6 +61,7 @@ export interface NotionProperty {
   multi_select?: { id: string; name: string; color?: string }[];
   select?: { id: string; name: string; color?: string } | null;
   number?: number | null;
+  checkbox?: boolean;
   [k: string]: unknown;
 }
 
@@ -161,6 +169,17 @@ export class NotionClient {
     await this.request("PATCH", `/v1/pages/${pageId}`, { archived: true });
   }
 
+  /**
+   * Flip just the `Published` checkbox on a page. Used by `publish` to
+   * mark a Notion-side draft as ready without touching its body or
+   * other properties — the user has been editing it in Notion's UI.
+   */
+  async setPublished(pageId: string, published: boolean): Promise<void> {
+    await this.request("PATCH", `/v1/pages/${pageId}`, {
+      properties: { Published: { checkbox: published } },
+    });
+  }
+
   /** Patch a page's properties without touching its content. */
   async updateSkillPageProperties(
     pageId: string,
@@ -196,19 +215,21 @@ export class NotionClient {
     const descriptionProp = SCHEMA.find((p) => p.notionName === "Description")!;
     const tagsProp = SCHEMA.find((p) => p.notionName === "Tags")!;
     const installsProp = SCHEMA.find((p) => p.notionName === "Installs")!;
+    const publishedProp = SCHEMA.find((p) => p.notionName === "Published")!;
     const body = {
       parent,
       title: [{ type: "text", text: { content: opts.title } }],
       initial_data_source: {
-        // Eager properties: Name + Description (skill spec) + Tags (Notion-only
-        // discovery filter, never round-tripped to SKILL.md so it won't be
-        // created on demand) + Installs (store metric). Everything else is
-        // added progressively by `publish`.
+        // Eager properties: Name + Description (skill spec) + Tags
+        // (Notion-only discovery filter, never round-tripped) + Installs
+        // (store metric) + Published (draft/ready gate). Everything else
+        // is added progressively by `publish`.
         properties: {
           [titleProp.notionName]: { title: {} },
           [descriptionProp.notionName]: propertyDefinitionPayload(descriptionProp),
           [tagsProp.notionName]: propertyDefinitionPayload(tagsProp),
           [installsProp.notionName]: propertyDefinitionPayload(installsProp),
+          [publishedProp.notionName]: propertyDefinitionPayload(publishedProp),
         },
       },
     };
@@ -581,6 +602,21 @@ export function readNumber(
   return typeof n === "number" ? n : 0;
 }
 
+/**
+ * Read a checkbox property. Treats missing or wrong-typed properties as
+ * `false`. Use `dataSourceHasProperty` to disambiguate "column missing"
+ * from "column present, value unchecked" when the distinction matters
+ * (e.g. backward-compat for stores without a Published column).
+ */
+export function readCheckbox(
+  props: Record<string, NotionProperty>,
+  name: string,
+): boolean {
+  const p = props[name];
+  if (!p || p.type !== "checkbox") return false;
+  return p.checkbox === true;
+}
+
 // ---------- Schema payload builders ----------
 
 /**
@@ -620,6 +656,9 @@ export function buildPagePropertiesPayload(
 
   // multi_select fields
   pushMultiSelect(payload, "Tags", props.tags);
+
+  // checkbox fields
+  pushCheckbox(payload, "Published", props.published);
 
   return payload;
 }
@@ -665,6 +704,15 @@ function pushMultiSelect(
   payload[notionName] = {
     multi_select: value.filter((v) => v && v.trim() !== "").map((name) => ({ name })),
   };
+}
+
+function pushCheckbox(
+  payload: Record<string, unknown>,
+  notionName: string,
+  value: boolean | undefined,
+): void {
+  if (value === undefined) return;
+  payload[notionName] = { checkbox: value };
 }
 
 /**

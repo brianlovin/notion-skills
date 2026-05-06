@@ -12,6 +12,7 @@ The drift signal is content-based, not timestamp-based. A skill is "outdated" wh
 | **Local sibling file edited / added / removed on disk** | yes | covered by `local_hash` (whole-dir hash) |
 | Tags edited | **no** | discovery sugar, doesn't affect execution |
 | Installs counter incremented | **no** | store-managed metric, not user content |
+| Published checkbox flipped | **no** | draft/ready gate, doesn't change skill content |
 
 The `taxonomyOnly` and `metricOnly` flags in `src/schema.ts` are what excludes Tags and Installs from `props_hash`. Don't add new excluded properties without thinking about the failure mode.
 

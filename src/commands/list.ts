@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   NotionClient,
   type NotionPage,
+  readCheckbox,
   readMultiSelect,
   readNumber,
   readRichText,
@@ -124,7 +125,15 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
 
   const rows: Row[] = [];
 
-  // Pass 1: rows from the Notion store (installed / outdated / available / invalid).
+  // Detect whether the data source has the Published column at all.
+  // When absent (older stores that haven't opted in to drafts), every
+  // row is treated as ready — no behavior change for those teams.
+  // When present, Published=false rows are surfaced as drafts.
+  const publishedColumnExists = pages.some(
+    (p) => p.properties.Published !== undefined,
+  );
+
+  // Pass 1: rows from the Notion store (installed / outdated / available / draft / invalid).
   for (const page of pages) {
     if (page.archived || page.in_trash) continue;
     const title = readTitle(page.properties);
@@ -144,15 +153,30 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
     const description = readRichText(page.properties, "Description");
     const tags = readMultiSelect(page.properties, "Tags");
     const installs = readNumber(page.properties, "Installs");
+    const isDraft =
+      publishedColumnExists && !readCheckbox(page.properties, "Published");
 
     const inManifest = trackedNames.has(name);
     if (!inManifest) {
-      rows.push({ name, title, description, tags, installs, state: "available" });
+      rows.push({
+        name,
+        title,
+        description,
+        tags,
+        installs,
+        // Notion-side draft (Published=false): surfaces in `list` with
+        // the same ✎ marker as a local-only draft. Available means
+        // "ready and not installed" — drafts don't fit there.
+        state: isDraft ? "draft" : "available",
+      });
       continue;
     }
 
     // Installed — defer the (potentially network-bound) drift check
     // to a second pass so we can issue concurrent block fetches.
+    // Even if a skill has been flipped to Published=false in Notion
+    // after install, we keep its installed state in this view: the
+    // user already has it locally and that view is the truth for them.
     rows.push({
       name,
       title,

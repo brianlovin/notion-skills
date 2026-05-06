@@ -226,6 +226,20 @@ export const SCHEMA: PropertyDef[] = [
     metricOnly: true,
     description: "Install count. Auto-incremented by `notion-skills install`.",
   },
+  {
+    // Draft / ready gate. Unchecked = draft (hidden from `--available`,
+    // skipped by bulk install, sorted last in `list`). The act of
+    // running `notion-skills publish` checks this; `unpublish` archives
+    // the page entirely (separate verb). Backward-compat: when this
+    // column is absent from the data source, every row is treated as
+    // ready — teams who haven't added the column see no behavior
+    // change.
+    notionName: "Published",
+    frontmatterKey: "published",
+    kind: "checkbox",
+    metricOnly: true,
+    description: "Mark a skill as ready for team consumption. Unchecked = draft.",
+  },
 ];
 
 /**

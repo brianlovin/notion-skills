@@ -3,7 +3,12 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { confirm } from "@inquirer/prompts";
 import { getScope } from "../scope.js";
-import { NotionClient, readMultiSelect, readTitle } from "../notion.js";
+import {
+  NotionClient,
+  readCheckbox,
+  readMultiSelect,
+  readTitle,
+} from "../notion.js";
 import { assertNtnInstalled } from "../ntn.js";
 import {
   buildSkillMarkdown,
@@ -82,11 +87,18 @@ export async function installCommand(
   const collisions = detectSlugCollisions(pages);
   const colliding = collidingSlugSet(collisions);
 
+  // Detect whether the data source has the Published column at all.
+  // When absent, every row is treated as ready (backward compat).
+  const publishedColumnExists = pages.some(
+    (p) => p.properties.Published !== undefined,
+  );
+
   // Build candidate set based on flags.
   interface Candidate {
     name: string;
     pageId: string;
     pageIndex: number;
+    isDraft: boolean;
   }
   const allCandidates: Candidate[] = [];
   for (let i = 0; i < pages.length; i++) {
@@ -96,7 +108,9 @@ export async function installCommand(
     if (!title) continue;
     const name = slugify(title);
     if (colliding.has(name)) continue;
-    allCandidates.push({ name, pageId: page.id, pageIndex: i });
+    const isDraft =
+      publishedColumnExists && !readCheckbox(page.properties, "Published");
+    allCandidates.push({ name, pageId: page.id, pageIndex: i, isDraft });
   }
 
   let candidates: Candidate[];
@@ -131,6 +145,7 @@ export async function installCommand(
   } else if (opts.tag && opts.tag.length > 0) {
     const wanted = opts.tag.flatMap((t) => t.split(",")).map((t) => t.trim()).filter(Boolean);
     candidates = allCandidates.filter((c) => {
+      if (c.isDraft) return false;
       const tags = readMultiSelect(pages[c.pageIndex]!.properties, "Tags");
       return wanted.every((w) => tags.includes(w));
     });
@@ -140,17 +155,31 @@ export async function installCommand(
       );
     }
   } else {
-    candidates = allCandidates;
+    // --all: skip drafts. The user has to install drafts by explicit
+    // slug — bulk operations don't auto-include unfinished work.
+    candidates = allCandidates.filter((c) => !c.isDraft);
   }
 
-  // Bulk-mode collision warning: name what we skipped so the user can
-  // go fix it in Notion. Explicit-slug mode already errored above.
-  if (collisions.length > 0 && slugs.length === 0) {
-    console.log(
-      chalk.yellow(
-        `Skipping ${collisions.length} ambiguous ${collisions.length === 1 ? "slug" : "slugs"} (multiple pages share each): ${collisions.map((c) => c.slug).join(", ")}.`,
-      ),
-    );
+  // Bulk-mode warnings: surface what we skipped so the user can react.
+  // Explicit-slug mode handled above (collisions error; drafts are
+  // allowed by the explicit-slug path because the user asked for them
+  // by name).
+  if (slugs.length === 0) {
+    if (collisions.length > 0) {
+      console.log(
+        chalk.yellow(
+          `Skipping ${collisions.length} ambiguous ${collisions.length === 1 ? "slug" : "slugs"} (multiple pages share each): ${collisions.map((c) => c.slug).join(", ")}.`,
+        ),
+      );
+    }
+    const draftCount = allCandidates.filter((c) => c.isDraft).length;
+    if (draftCount > 0) {
+      console.log(
+        chalk.dim(
+          `Skipping ${draftCount} ${draftCount === 1 ? "draft" : "drafts"} (Published=false). Install by name to include.`,
+        ),
+      );
+    }
   }
 
   // Filter out already-installed (idempotent install --all / --tag).

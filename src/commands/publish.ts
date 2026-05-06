@@ -7,6 +7,7 @@ import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
 import {
   buildSkillMarkdown,
   convertPageToSkill,
+  slugify,
 } from "../convert.js";
 import {
   type Manifest,
@@ -19,7 +20,7 @@ import {
   hashBehaviorProperties,
   hashSkillContent,
 } from "../page-hash.js";
-import { NotionClient } from "../notion.js";
+import { NotionClient, readCheckbox, readTitle } from "../notion.js";
 import {
   hashLocalSkillDir,
   readLocalSkillFiles,
@@ -78,32 +79,70 @@ export async function publishCommand(
   );
 
   if (slugs.length > 0) {
-    // Pre-flight: warn if any of the requested slugs aren't on disk yet.
-    const missing = slugs.filter(
-      (s) => !existsSync(join(SKILLS_STORE, s, "SKILL.md")),
+    // Three paths a slug can take:
+    //   1. Installed (manifest entry exists)        → pushUpdates
+    //   2. Local draft (central-store dir, no entry)→ migrateCommand
+    //   3. Notion-side draft (page exists w/ Published=false, no local
+    //      presence)                                → flip Published=true
+    // Anything that doesn't match any of the three is a typo / wrong
+    // slug; we error.
+    const updateSlugs = slugs.filter((s) => trackedNames.has(s));
+    const localDraftSlugs = slugs.filter(
+      (s) =>
+        !trackedNames.has(s) &&
+        existsSync(join(SKILLS_STORE, s, "SKILL.md")),
     );
-    if (missing.length > 0) {
-      throw new Error(
-        `Cannot publish: ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not in the central store.\n` +
-          `Run \`notion-skills gen\` to create a draft, or check \`notion-skills list --drafts\`.`,
-      );
+    const unresolved = slugs.filter(
+      (s) => !trackedNames.has(s) && !existsSync(join(SKILLS_STORE, s, "SKILL.md")),
+    );
+
+    // For unresolved slugs, look them up in Notion as potential
+    // Notion-side drafts. One query covers all of them.
+    const notionDraftSlugs: { slug: string; pageId: string }[] = [];
+    const stillMissing: string[] = [];
+    if (unresolved.length > 0) {
+      await assertNtnInstalled();
+      const client = new NotionClient();
+      const pages = await client.queryDataSource(scope.data_source_id);
+      const wantedSet = new Set(unresolved);
+      const found = new Map<string, string>(); // slug → pageId of a draft match
+      for (const page of pages) {
+        if (page.archived || page.in_trash) continue;
+        const title = readTitle(page.properties);
+        if (!title) continue;
+        const pageSlug = slugify(title);
+        if (!wantedSet.has(pageSlug)) continue;
+        // Only treat as "publishable from CLI" if it's actually a draft.
+        // A non-draft slug that's neither installed nor local is a state
+        // we can't fix from the CLI — surface it as missing.
+        if (!readCheckbox(page.properties, "Published")) {
+          found.set(pageSlug, page.id);
+        }
+      }
+      for (const slug of unresolved) {
+        const pageId = found.get(slug);
+        if (pageId) notionDraftSlugs.push({ slug, pageId });
+        else stillMissing.push(slug);
+      }
     }
 
-    // Split into updates (already in manifest) vs new drafts.
-    const updateSlugs = slugs.filter((s) => trackedNames.has(s));
-    const draftSlugs = slugs.filter((s) => !trackedNames.has(s));
+    if (stillMissing.length > 0) {
+      throw new Error(
+        `Cannot publish: ${stillMissing.join(", ")} ${stillMissing.length === 1 ? "is" : "are"} not in the central store and not a draft in Notion.\n` +
+          `Run \`notion-skills gen\` to create a draft locally, or check \`notion-skills list --drafts\` for what's available.`,
+      );
+    }
 
     if (updateSlugs.length > 0 && manifest) {
       await pushUpdates(scope, manifest, updateSlugs);
     }
-    if (draftSlugs.length > 0) {
-      await migrateCommand({ yes: true, only: draftSlugs });
+    if (localDraftSlugs.length > 0) {
+      await migrateCommand({ yes: true, only: localDraftSlugs });
+    }
+    if (notionDraftSlugs.length > 0) {
+      await flipPublishedForDrafts(notionDraftSlugs);
     }
 
-    const total = updateSlugs.length + draftSlugs.length;
-    if (total > 0 && updateSlugs.length > 0 && draftSlugs.length === 0) {
-      // Pure-update flow already prints its own banner.
-    }
     return;
   }
 
@@ -216,7 +255,11 @@ async function pushUpdates(
     try {
       await client.updateSkillPageProperties(
         p.pageId,
-        p.properties as never, // SkillProperties shape
+        // Running `publish` is an explicit "ship it" gesture — always
+        // ensures Published=true. Skills installed from a Notion-side
+        // draft and then edited locally publish forward, not back into
+        // draft state. (Path 2 of publish; mirrors paths 1 + 3.)
+        { ...p.properties, published: true } as never,
       );
       if (p.body.trim()) {
         await ntnSetPageMarkdown(p.pageId, p.body);
@@ -334,6 +377,38 @@ async function upsertChildPages(
       await client.archivePage(id);
     }
   }
+}
+
+/**
+ * Path-3 publish: the user passed a slug that resolves to a Notion-side
+ * draft (page exists with Published=false, no local presence). Flip the
+ * Published checkbox to true. No body upload, no manifest entry — the
+ * skill stays remote-only until someone explicitly `install`s it.
+ */
+async function flipPublishedForDrafts(
+  drafts: { slug: string; pageId: string }[],
+): Promise<void> {
+  const client = new NotionClient();
+  console.log(
+    chalk.bold(
+      `Publishing ${drafts.length} Notion ${drafts.length === 1 ? "draft" : "drafts"}:`,
+    ),
+  );
+  for (const d of drafts) {
+    const task = startTask(d.slug);
+    try {
+      await client.setPublished(d.pageId, true);
+      task.done();
+    } catch (err) {
+      task.fail((err as Error).message.split("\n")[0]);
+    }
+  }
+  console.log("");
+  console.log(
+    chalk.green(
+      `✓ Marked ${drafts.length} ${drafts.length === 1 ? "draft" : "drafts"} as ready.`,
+    ),
+  );
 }
 
 /**
