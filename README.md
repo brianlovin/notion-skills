@@ -14,7 +14,7 @@ AI coding agents (Claude Code, Codex, OpenCode, Cursor, Gemini) all read [skills
 - ✏️ **Edit in Notion.** Use the rich editor; collaborate live; no IDE, no git, no PR review.
 - 👥 **Built for teams.** One store, shared with everyone; each person installs what's relevant to them.
 - 🤖 **Generate with your agent.** `gen` hands an idea off to your coding agent and writes you a draft.
-- 🎯 **One source, every agent.** The same skill works in Claude, Codex, Cursor, and the rest.
+- 🎯 **Install once, every agent reads it.** The same skill works in Claude, Codex, Cursor, and the rest.
 
 ## Get started
 
