@@ -15,6 +15,7 @@ import {
   deriveKey,
   findByDatabaseId,
   findByKey,
+  slugifyDbTitle,
   validateKey,
 } from "../sources.js";
 import { pickOrCreateDatabase } from "./_db-picker.js";
@@ -44,22 +45,38 @@ export async function sourceAddCommand(opts: SourceAddOptions = {}): Promise<voi
   }
 
   const existingKeys = new Set(scope.sources.map((s) => s.key));
-  let key = opts.key ?? deriveKey(picked.databaseTitle, existingKeys);
-  if (process.stdin.isTTY) {
-    key = await input({
-      message: "Source key (used in CLI args + manifest):",
-      default: key,
-      validate: (v) => {
-        const e = validateKey(v);
-        if (e) return e;
-        if (existingKeys.has(v)) return `key "${v}" is already in use`;
-        return true;
-      },
-    });
-  } else {
-    const e = validateKey(key);
+  let key: string;
+  if (opts.key) {
+    // Explicit override (--key). Validate strictly; never prompt.
+    const e = validateKey(opts.key);
     if (e) throw new Error(`Invalid source key: ${e}`);
-    if (existingKeys.has(key)) throw new Error(`key "${key}" is already in use`);
+    if (existingKeys.has(opts.key)) {
+      throw new Error(`key "${opts.key}" is already in use`);
+    }
+    key = opts.key;
+  } else {
+    // Auto-derive from the database title. Only prompt when the
+    // derived key would collide with an existing source — the user
+    // needs to disambiguate. Otherwise just use it silently.
+    const baseSlug = slugifyDbTitle(picked.databaseTitle);
+    const collides = existingKeys.has(baseSlug);
+    if (!collides) {
+      key = baseSlug;
+    } else if (process.stdin.isTTY) {
+      key = await input({
+        message: `Source key "${baseSlug}" already exists. Pick another:`,
+        default: deriveKey(picked.databaseTitle, existingKeys),
+        validate: (v) => {
+          const e = validateKey(v);
+          if (e) return e;
+          if (existingKeys.has(v)) return `key "${v}" is already in use`;
+          return true;
+        },
+      });
+    } else {
+      // Non-TTY collision: auto-suffix and proceed.
+      key = deriveKey(picked.databaseTitle, existingKeys);
+    }
   }
 
   const newSource: Source = {

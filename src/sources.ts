@@ -47,18 +47,27 @@ export function defaultSource(sources: Source[]): Source | undefined {
 }
 
 /**
- * Slug-style transform of a database title into a candidate source key.
- * Strips non-alphanumerics, lowercases, collapses runs of hyphens. If
- * the candidate would collide with an existing key, suffix with -2, -3
- * etc. until unique.
+ * Pure slug-from-title transform. No collision handling; caller decides
+ * what to do when this collides with an existing key. Used by `source
+ * add` so it can detect "would collide?" and only prompt in that case.
  */
-export function deriveKey(databaseTitle: string, existingKeys: Set<string>): string {
-  const base =
+export function slugifyDbTitle(databaseTitle: string): string {
+  return (
     databaseTitle
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "")
-      .slice(0, KEY_MAX) || "source";
+      .slice(0, KEY_MAX) || "source"
+  );
+}
+
+/**
+ * Slug-from-title with collision avoidance. Suffix `-2`, `-3`, … until
+ * unique. Used at v1→v2 migration time and as the prompt default in
+ * `source add` when a collision forces re-prompting.
+ */
+export function deriveKey(databaseTitle: string, existingKeys: Set<string>): string {
+  const base = slugifyDbTitle(databaseTitle);
   if (!existingKeys.has(base)) return base;
   for (let i = 2; i < 1000; i++) {
     const candidate = `${base}-${i}`.slice(0, KEY_MAX);

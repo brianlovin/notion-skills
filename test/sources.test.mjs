@@ -6,6 +6,7 @@ import {
   findByDatabaseId,
   defaultSource,
   deriveKey,
+  slugifyDbTitle,
   parseSkillRef,
   formatRef,
   resolveTargetSource,
@@ -44,6 +45,21 @@ test("validateKey: accepts hyphens + digits", () => {
 
 test("validateKey: accepts single character", () => {
   assert.equal(validateKey("t"), null);
+});
+
+// ---------- slugifyDbTitle ----------
+
+test("slugifyDbTitle: pure transform, ignores collisions", () => {
+  assert.equal(slugifyDbTitle("Runbooks"), "runbooks");
+  assert.equal(slugifyDbTitle("Engineering Skills"), "engineering-skills");
+  assert.equal(slugifyDbTitle(""), "source");
+});
+
+test("slugifyDbTitle: returns same value regardless of existing keys", () => {
+  // Unlike deriveKey, slugifyDbTitle never appends a suffix — caller
+  // decides how to handle collisions (e.g. prompt the user).
+  assert.equal(slugifyDbTitle("Runbooks"), "runbooks");
+  assert.equal(slugifyDbTitle("Runbooks"), "runbooks");
 });
 
 // ---------- deriveKey ----------
