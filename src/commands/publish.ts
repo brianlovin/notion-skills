@@ -248,6 +248,13 @@ async function pushUpdates(
     await client.ensureSelectOptions(scope.data_source_id, selectValues);
   }
 
+  // Snapshot the data source's columns once per batch so the metadata
+  // round-trip can match frontmatter `metadata.<key>` against existing
+  // columns. Keys without a matching column are silently skipped (no
+  // auto-creation from metadata — user adds columns intentionally).
+  const dataSource = await client.getDataSource(scope.data_source_id);
+  const existingColumns = new Set(Object.keys(dataSource.properties));
+
   // Push each.
   const pushed: { name: string; pageId: string }[] = [];
   for (const p of parsed) {
@@ -260,6 +267,7 @@ async function pushUpdates(
         // draft and then edited locally publish forward, not back into
         // draft state. (Path 2 of publish; mirrors paths 1 + 3.)
         { ...p.properties, published: true } as never,
+        existingColumns,
       );
       if (p.body.trim()) {
         await ntnSetPageMarkdown(p.pageId, p.body);

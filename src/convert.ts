@@ -1,5 +1,10 @@
 import { stringify as yamlStringify } from "yaml";
-import type { NotionBlock, NotionPage, NotionRichText } from "./notion.js";
+import type {
+  NotionBlock,
+  NotionPage,
+  NotionProperty,
+  NotionRichText,
+} from "./notion.js";
 import {
   NotionClient,
   readMultiSelect,
@@ -67,6 +72,7 @@ export function buildSkillMarkdown(opts: {
     // belong in SKILL.md frontmatter. We still read them from Notion
     // and persist them on the row; we just don't round-trip to disk.
     if (prop.taxonomyOnly) continue;
+    if (prop.metricOnly) continue;
 
     // Skip select values that mean "use spec default"
     if (prop.kind === "select") {
@@ -87,6 +93,16 @@ export function buildSkillMarkdown(opts: {
     }
 
     fm[key] = value;
+  }
+
+  // Spec's official extension point: any non-SCHEMA Notion column the
+  // user added gets surfaced under `metadata`. Emit only when non-empty
+  // so single-column skills stay tidy.
+  if (
+    opts.properties.metadata &&
+    Object.keys(opts.properties.metadata).length > 0
+  ) {
+    fm.metadata = opts.properties.metadata;
   }
 
   const fmText = yamlStringify(fm).trimEnd();
@@ -213,10 +229,14 @@ function readSkillPropertiesFromPage(
     return v.length > 0 ? v : undefined;
   };
 
+  // core (spec)
+  props.license = richText("License");
+  props.compatibility = richText("Compatibility");
+  props["allowed-tools"] = toolsList("Allowed Tools");
+  // claude
   props.when_to_use = richText("When To Use");
   props["argument-hint"] = richText("Argument Hint");
   props.arguments = listFromText("Arguments", /\s+/);
-  props["allowed-tools"] = toolsList("Allowed Tools");
   props.paths = listFromText("Paths", /\s*,\s*/);
   props["disable-model-invocation"] = select("Disable Model Invocation");
   props["user-invocable"] = select("User Invocable");
@@ -225,9 +245,94 @@ function readSkillPropertiesFromPage(
   props.context = select("Context");
   props.agent = select("Agent");
   props.shell = select("Shell");
+  // notion-side
   props.tags = multiSelect("Tags");
 
+  // metadata: anything NOT in SCHEMA and not a derived/auto property
+  // gets surfaced as `metadata.<column-name>` in SKILL.md frontmatter.
+  // This is the spec's official extension point — users add Notion
+  // columns at will, and they round-trip without further code changes.
+  props.metadata = readMetadataFromPage(page.properties);
+
   return props;
+}
+
+/** Notion property types that are derived/auto-managed and shouldn't
+ * round-trip as user metadata. */
+const NON_USER_METADATA_TYPES = new Set([
+  "created_time",
+  "created_by",
+  "last_edited_time",
+  "last_edited_by",
+  "formula",
+  "rollup",
+  "relation",
+  "unique_id",
+  "people",
+  "files",
+  "verification",
+  "button",
+]);
+
+function readMetadataFromPage(
+  props: Record<string, NotionProperty>,
+): Record<string, unknown> | undefined {
+  const schemaNames = new Set(SCHEMA.map((p) => p.notionName));
+  const out: Record<string, unknown> = {};
+  for (const [name, prop] of Object.entries(props)) {
+    if (schemaNames.has(name)) continue;
+    if (NON_USER_METADATA_TYPES.has(prop.type)) continue;
+    const value = readMetadataValue(prop);
+    if (value === undefined) continue;
+    out[name] = value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function readMetadataValue(prop: NotionProperty): unknown {
+  switch (prop.type) {
+    case "rich_text": {
+      const text = (prop.rich_text ?? [])
+        .map((rt) => rt.plain_text ?? "")
+        .join("");
+      return text || undefined;
+    }
+    case "title": {
+      const text = (prop.title ?? [])
+        .map((rt) => rt.plain_text ?? "")
+        .join("");
+      return text || undefined;
+    }
+    case "select": {
+      const sel = prop.select as { name?: string } | null | undefined;
+      return sel?.name;
+    }
+    case "multi_select": {
+      const items = (prop.multi_select ?? [])
+        .map((opt) => opt.name)
+        .filter((s): s is string => !!s);
+      return items.length > 0 ? items : undefined;
+    }
+    case "number": {
+      return typeof prop.number === "number" ? prop.number : undefined;
+    }
+    case "checkbox": {
+      return prop.checkbox === true;
+    }
+    case "url":
+    case "email":
+    case "phone_number": {
+      const v = (prop as Record<string, unknown>)[prop.type];
+      return typeof v === "string" && v.length > 0 ? v : undefined;
+    }
+    case "date": {
+      const date = prop.date as { start?: string; end?: string } | null | undefined;
+      if (!date?.start) return undefined;
+      return date.end ? `${date.start}/${date.end}` : date.start;
+    }
+    default:
+      return undefined;
+  }
 }
 
 /**

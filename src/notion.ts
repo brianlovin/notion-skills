@@ -11,21 +11,26 @@ const NOTION_API_VERSION = "2025-09-03";
  * a parsed-frontmatter object straight through.
  */
 export interface SkillProperties {
+  // Core (Agent Skills spec)
   /** Required. Slugified page title. */
   name: string;
   description: string;
+  license?: string;
+  compatibility?: string;
+  "allowed-tools"?: string[];
+  // Claude Code conventions
   when_to_use?: string;
   "argument-hint"?: string;
   arguments?: string[];
-  "allowed-tools"?: string[];
   paths?: string[];
-  "disable-model-invocation"?: string; // "true" | "false" — strings so callers can pass spec values directly
+  "disable-model-invocation"?: string;
   "user-invocable"?: string;
   model?: string;
   effort?: string;
   context?: string;
   agent?: string;
   shell?: string;
+  // notion-skills infrastructure
   /** Discovery tags (Notion multi_select). Empty / undefined means untagged. */
   tags?: string[];
   /**
@@ -35,6 +40,13 @@ export interface SkillProperties {
    * page create / via `publish` and otherwise managed in Notion's UI.
    */
   published?: boolean;
+  /**
+   * Spec's official extension point: "a map from string keys to string
+   * values. Clients can use this to store additional properties not
+   * defined by the Agent Skills spec." We round-trip any non-SCHEMA
+   * Notion column through this map (key = literal column name).
+   */
+  metadata?: Record<string, unknown>;
 }
 
 export interface NotionPage {
@@ -126,10 +138,17 @@ export class NotionClient {
   async createSkillPage(
     dataSourceId: string,
     props: SkillProperties,
+    /**
+     * Optional set of columns that exist on the data source — used to
+     * filter `props.metadata` keys to only those a column exists for.
+     * Caller fetches once per batch and passes through to avoid an
+     * extra getDataSource call per page.
+     */
+    existingColumns?: Set<string>,
   ): Promise<string> {
     const body: Record<string, unknown> = {
       parent: { type: "data_source_id", data_source_id: dataSourceId },
-      properties: buildPagePropertiesPayload(props),
+      properties: buildPagePropertiesPayload(props, existingColumns),
       children: [],
     };
     const created = await this.request<{ id: string }>("POST", "/v1/pages", body);
@@ -184,9 +203,10 @@ export class NotionClient {
   async updateSkillPageProperties(
     pageId: string,
     props: SkillProperties,
+    existingColumns?: Set<string>,
   ): Promise<void> {
     await this.request("PATCH", `/v1/pages/${pageId}`, {
-      properties: buildPagePropertiesPayload(props),
+      properties: buildPagePropertiesPayload(props, existingColumns),
     });
   }
 
@@ -211,26 +231,22 @@ export class NotionClient {
       ? { type: "page_id", page_id: opts.parentPageId }
       : { type: "workspace", workspace: true };
 
-    const titleProp = SCHEMA.find((p) => p.kind === "title")!;
-    const descriptionProp = SCHEMA.find((p) => p.notionName === "Description")!;
-    const tagsProp = SCHEMA.find((p) => p.notionName === "Tags")!;
-    const installsProp = SCHEMA.find((p) => p.notionName === "Installs")!;
-    const publishedProp = SCHEMA.find((p) => p.notionName === "Published")!;
+    // Eager: every core (spec) property + every notion-skills infra
+    // property. Claude-tier extensions are progressive.
+    const eagerProps: Record<string, unknown> = {};
+    for (const prop of SCHEMA) {
+      if (prop.tier !== "core" && prop.tier !== "notion") continue;
+      if (prop.kind === "title") {
+        eagerProps[prop.notionName] = { title: {} };
+      } else {
+        eagerProps[prop.notionName] = propertyDefinitionPayload(prop);
+      }
+    }
     const body = {
       parent,
       title: [{ type: "text", text: { content: opts.title } }],
       initial_data_source: {
-        // Eager properties: Name + Description (skill spec) + Tags
-        // (Notion-only discovery filter, never round-tripped) + Installs
-        // (store metric) + Published (draft/ready gate). Everything else
-        // is added progressively by `publish`.
-        properties: {
-          [titleProp.notionName]: { title: {} },
-          [descriptionProp.notionName]: propertyDefinitionPayload(descriptionProp),
-          [tagsProp.notionName]: propertyDefinitionPayload(tagsProp),
-          [installsProp.notionName]: propertyDefinitionPayload(installsProp),
-          [publishedProp.notionName]: propertyDefinitionPayload(publishedProp),
-        },
+        properties: eagerProps,
       },
     };
     const created = await this.request<{
@@ -657,6 +673,15 @@ export function readCheckbox(
  */
 export function buildPagePropertiesPayload(
   props: SkillProperties,
+  /**
+   * Optional: set of column names that exist on the data source. When
+   * provided, metadata keys are matched against this set — keys that
+   * don't match an existing column are silently skipped (we don't
+   * auto-create columns from metadata). When omitted, all metadata
+   * keys are written (caller's choice; usually only safe at create
+   * time).
+   */
+  existingColumns?: Set<string>,
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     Name: { title: [{ type: "text", text: { content: props.name } }] },
@@ -665,16 +690,16 @@ export function buildPagePropertiesPayload(
     },
   };
 
-  // rich_text fields
+  // core (Agent Skills spec)
+  pushRichText(payload, "License", props.license);
+  pushRichText(payload, "Compatibility", props.compatibility);
+  pushList(payload, "Allowed Tools", props["allowed-tools"], " ");
+
+  // claude
   pushRichText(payload, "When To Use", props.when_to_use);
   pushRichText(payload, "Argument Hint", props["argument-hint"]);
-
-  // list_text fields (joined into rich_text)
   pushList(payload, "Arguments", props.arguments, " ");
-  pushList(payload, "Allowed Tools", props["allowed-tools"], " ");
   pushList(payload, "Paths", props.paths, ", ");
-
-  // select fields (Agent is a self-healing select per schema)
   pushSelect(payload, "Disable Model Invocation", props["disable-model-invocation"]);
   pushSelect(payload, "User Invocable", props["user-invocable"]);
   pushSelect(payload, "Model", props.model);
@@ -683,13 +708,52 @@ export function buildPagePropertiesPayload(
   pushSelect(payload, "Agent", props.agent);
   pushSelect(payload, "Shell", props.shell);
 
-  // multi_select fields
+  // notion-side
   pushMultiSelect(payload, "Tags", props.tags);
-
-  // checkbox fields
   pushCheckbox(payload, "Published", props.published);
 
+  // metadata — spec extension point. Each metadata key is matched
+  // against an existing Notion column (when existingColumns is
+  // provided) and written if a matching column exists.
+  if (props.metadata) {
+    for (const [key, value] of Object.entries(props.metadata)) {
+      if (existingColumns && !existingColumns.has(key)) continue;
+      const cell = metadataValueToPropertyCell(value);
+      if (cell !== undefined) payload[key] = cell;
+    }
+  }
+
   return payload;
+}
+
+/**
+ * Coerce a metadata value into a Notion property-cell shape. We don't
+ * know the column's actual type, so we make a best-effort guess from
+ * the JS type. Strings → rich_text, numbers → number, booleans →
+ * checkbox, arrays → multi_select. The caller already filtered by
+ * existing columns, so an unsuitable type just fails the API call —
+ * which is the right error (loud) rather than silent-and-wrong.
+ */
+function metadataValueToPropertyCell(value: unknown): unknown {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") {
+    if (value === "") return undefined;
+    return { rich_text: [{ type: "text", text: { content: value } }] };
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return { number: value };
+  }
+  if (typeof value === "boolean") {
+    return { checkbox: value };
+  }
+  if (Array.isArray(value)) {
+    const names = value
+      .filter((v) => typeof v === "string" && v.trim() !== "")
+      .map((v) => ({ name: v as string }));
+    if (names.length === 0) return undefined;
+    return { multi_select: names };
+  }
+  return undefined;
 }
 
 function pushRichText(

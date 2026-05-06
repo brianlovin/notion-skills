@@ -263,10 +263,14 @@ export async function parseSkillFile(
   const properties: SkillProperties = {
     name: slug,
     description,
+    // core (Agent Skills spec)
+    license: optionalString(parsedFm.license),
+    compatibility: optionalString(parsedFm.compatibility),
+    "allowed-tools": optionalToolsList(parsedFm["allowed-tools"]),
+    // claude
     when_to_use: optionalString(parsedFm.when_to_use),
     "argument-hint": optionalString(parsedFm["argument-hint"]),
     arguments: optionalList(parsedFm.arguments, /\s+/),
-    "allowed-tools": optionalToolsList(parsedFm["allowed-tools"]),
     paths: optionalList(parsedFm.paths, /\s*,\s*/),
     "disable-model-invocation": optionalBoolString(parsedFm["disable-model-invocation"]),
     "user-invocable": optionalBoolString(parsedFm["user-invocable"]),
@@ -275,7 +279,11 @@ export async function parseSkillFile(
     context: optionalString(parsedFm.context),
     agent: optionalString(parsedFm.agent),
     shell: optionalString(parsedFm.shell),
+    // notion
     tags: optionalList(parsedFm.tags, /\s*,\s*/),
+    // spec extension point: arbitrary metadata surfaces back to matching
+    // Notion columns on push (silently skipped if no column exists).
+    metadata: optionalMetadata(parsedFm.metadata),
   };
 
   return {
@@ -295,6 +303,14 @@ function optionalString(v: unknown): string | undefined {
   if (v === undefined || v === null) return undefined;
   const s = String(v).trim();
   return s === "" ? undefined : s;
+}
+
+function optionalMetadata(v: unknown): Record<string, unknown> | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "object" || Array.isArray(v)) return undefined;
+  const obj = v as Record<string, unknown>;
+  if (Object.keys(obj).length === 0) return undefined;
+  return obj;
 }
 
 function optionalBoolString(v: unknown): string | undefined {

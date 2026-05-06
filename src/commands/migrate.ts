@@ -214,6 +214,12 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
     ];
   };
 
+  // Snapshot the data source's columns once per migrate run for
+  // metadata round-trip (frontmatter `metadata.<key>` is matched
+  // against existing column names; non-matching keys are skipped).
+  const dataSource = await client.getDataSource(scope.data_source_id);
+  const existingColumns = new Set(Object.keys(dataSource.properties));
+
   for (const c of willCreate) {
     if (c.kind !== "new") continue;
     const task = startTask(c.skill.name);
@@ -224,6 +230,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
         // CLI-published pages start with Published=true. Notion-side
         // drafts (created via Notion's UI) default to false instead.
         { ...c.skill.properties, published: true },
+        existingColumns,
       );
       if (c.skill.body.trim()) {
         await ntnSetPageMarkdown(pageId, c.skill.body);
@@ -244,6 +251,7 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
       await client.updateSkillPageProperties(
         c.existingPageId,
         c.skill.properties,
+        existingColumns,
       );
       if (c.skill.body.trim()) {
         await ntnSetPageMarkdown(c.existingPageId, c.skill.body);

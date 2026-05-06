@@ -10,6 +10,7 @@ import { parseNotionId } from "../parse-id.js";
 import { discoverSkills, type Classification } from "../migrate.js";
 import { migrateCommand } from "./migrate.js";
 import { pickLocalSkillsToUpload } from "./_pick-locals.js";
+import { EAGERLY_CREATED_PROPERTIES } from "../schema.js";
 
 /**
  * Wizard flow (app-store framing):
@@ -57,7 +58,7 @@ export async function initCommand(): Promise<void> {
   // they already exist.
   if (!isFresh) {
     const { added, retyped } = await client.upgradeSchema(dataSourceId, {
-      only: new Set(["Description", "Tags", "Installs", "Published"]),
+      only: new Set(EAGERLY_CREATED_PROPERTIES),
     });
     if (added.length || retyped.length) {
       const total = added.length + retyped.length;
