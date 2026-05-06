@@ -260,17 +260,19 @@ export class NotionClient {
   }
 
   /**
-   * Make sure the workspace store has the three canonical views the
+   * Make sure the workspace store has the four canonical views the
    * app-store framing relies on:
    *   - "All"     — sorted alphabetically by Name (default browse).
    *   - "Popular" — sorted by Installs descending (which skills are
    *                 catching on across the team).
    *   - "New"     — sorted by created_time descending (recent additions).
+   *   - "Drafts"  — only Published=false rows (work-in-progress that
+   *                 isn't ready for team consumption yet).
    *
-   * Idempotent: if a view by name already exists, PATCH its sort +
-   * column order. Otherwise POST to create it. Skips "Popular" if the
-   * Installs column doesn't exist yet (the install metric layer adds
-   * it on demand).
+   * Idempotent: if a view by name already exists, PATCH its sort /
+   * filter / column order. Otherwise POST to create it. Skips views
+   * whose required column doesn't exist on the data source yet
+   * (Installs for "Popular", Published for "Drafts").
    *
    * Fail-soft: any Views-API error is swallowed (logged in debug mode).
    * Users still get a working database even if their workspace doesn't
@@ -315,6 +317,7 @@ export class NotionClient {
           timestamp?: string;
           direction: "ascending" | "descending";
         }>;
+        filter?: Record<string, unknown>;
         skipIf?: () => boolean;
       }> = [
         {
@@ -330,25 +333,43 @@ export class NotionClient {
           name: "New",
           sorts: [{ timestamp: "created_time", direction: "descending" }],
         },
+        {
+          name: "Drafts",
+          sorts: [{ timestamp: "created_time", direction: "descending" }],
+          filter: {
+            property: "Published",
+            checkbox: { equals: false },
+          },
+          skipIf: () => !propertiesByName["Published"]?.id,
+        },
       ];
 
+      // Fire-once-at-creation semantics: if a view by name already
+      // exists we leave it alone (the user may have customised it; and
+      // PATCH validation on the Views API is stricter than POST in
+      // ways we can't reliably reproduce). New views in `desired` get
+      // POSTed; existing names are skipped.
       for (const view of desired) {
         if (view.skipIf?.()) continue;
-        const existingId = existingByName.get(view.name);
+        if (existingByName.has(view.name)) continue;
         const payload: Record<string, unknown> = {
           name: view.name,
           type: "table",
           sorts: view.sorts,
           configuration,
         };
-        if (existingId) {
-          await this.request("PATCH", `/v1/views/${existingId}`, payload);
-        } else {
+        if (view.filter) payload.filter = view.filter;
+        try {
           await this.request("POST", `/v1/views`, {
             database_id: databaseId,
             data_source_id: dataSourceId,
             ...payload,
           });
+        } catch (err) {
+          // One view's failure shouldn't block the others.
+          if (process.env.NOTION_SKILLS_DEBUG === "1") {
+            console.error(`view "${view.name}" failed:`, err);
+          }
         }
       }
     } catch (err) {

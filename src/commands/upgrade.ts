@@ -18,8 +18,13 @@ export async function upgradeCommand(): Promise<void> {
     chalk.dim(`Inspecting "${scope.database_title ?? scope.database_id}" schema...`),
   );
   const { added, retyped } = await client.upgradeSchema(scope.data_source_id);
+  // Reconcile default views (All / Popular / New / Drafts) too —
+  // upgrade is the natural place to pick up new views that ship with
+  // newer versions, not just schema columns.
+  await client.ensureDefaultViews(scope.database_id, scope.data_source_id);
+
   if (added.length === 0 && retyped.length === 0) {
-    console.log(chalk.green("✓ Schema is already up to date."));
+    console.log(chalk.green("✓ Schema and views are up to date."));
     return;
   }
   console.log(chalk.green(`✓ ${added.length} added, ${retyped.length} retyped.`));
