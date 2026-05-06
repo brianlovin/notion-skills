@@ -84,7 +84,7 @@ A skill you have edited locally won't push automatically — `notion-skills sync
 | Command | What it does |
 |---|---|
 | `init` | Connect to (or create) your workspace skill store. |
-| `list` | Browse what's in the store with state markers (installed, available, outdated, draft). The Installs column shows the install count. Supports `--installed`, `--available`, `--outdated`, `--drafts`, `--tag <name>`, `--sort popular` (by install count), `--json`. |
+| `list` | Browse what's in the store with state markers (installed, available, outdated, draft). The Installs column shows the install count. Supports `--installed`, `--available`, `--outdated`, `--drafts`, `--tag <name>`, `--sort <key>` (`name` / `popular` / `new`, plus synonyms), `--json`. |
 | `install <slug>` / `--tag` / `--all` | Pull a skill from the store onto this machine. |
 | `uninstall <slug>` | Remove a skill from this machine (Notion page is untouched). Auto-backs up local edits. |
 | `gen <input>` | Generate a new skill from a URL, file path, or prompt. The agent writes a local-first draft; review and `publish` when ready. |

@@ -63,8 +63,35 @@ interface Row {
   installs: number;
   state: SkillState;
   reason?: string;
+  /** ISO timestamp of when the Notion page was created. Empty for local drafts. */
+  createdTime: string;
   /** Carried internally so pass 2 can run drift checks without re-querying. */
   _page?: NotionPage;
+}
+
+type SortKey = "name" | "popular" | "new";
+
+/**
+ * Map any of the user-facing sort flag values to a canonical key.
+ * Unknown keys throw with the supported list — better than silently
+ * falling back to alphabetical and surprising the user (the original
+ * complaint that motivated the synonym layer).
+ */
+function normalizeSortKey(raw?: string): SortKey {
+  if (!raw) return "name";
+  const lower = raw.toLowerCase();
+  if (lower === "name" || lower === "alphabetical" || lower === "alpha") {
+    return "name";
+  }
+  if (lower === "popular" || lower === "installs" || lower === "downloads") {
+    return "popular";
+  }
+  if (lower === "new" || lower === "latest" || lower === "recent") {
+    return "new";
+  }
+  throw new Error(
+    `Unknown --sort value "${raw}". Options: name (alphabetical), popular (by install count), new (most recently created).`,
+  );
 }
 
 export async function listCommand(options: ListOptions = {}): Promise<void> {
@@ -148,6 +175,7 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
         installs: 0,
         state: "invalid",
         reason: "no title",
+        createdTime: page.created_time,
       });
       continue;
     }
@@ -170,6 +198,7 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
         // the same ✎ marker as a local-only draft. Available means
         // "ready and not installed" — drafts don't fit there.
         state: isDraft ? "draft" : "available",
+        createdTime: page.created_time,
       });
       continue;
     }
@@ -187,6 +216,7 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
       installs,
       state: "installed",
       _page: page,
+      createdTime: page.created_time,
     });
   }
 
@@ -277,6 +307,10 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
         description,
         tags,
         installs: 0,
+        // Local drafts have no Notion creation time; sort them last
+        // when sorting by "new". Empty string sorts after any ISO
+        // timestamp in descending order.
+        createdTime: "",
         state: "draft",
       });
     }
@@ -298,11 +332,22 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
     return true;
   });
 
-  if (options.sort === "popular" || options.sort === "installs") {
-    // Sorted by install count, descending — surface popular skills first.
-    // Within the same count, alphabetical.
+  const sortKey = normalizeSortKey(options.sort);
+  if (sortKey === "popular") {
+    // Install count desc; alphabetical tiebreak. Surfaces what the team
+    // has converged on.
     filtered.sort((a, b) => {
       if (b.installs !== a.installs) return b.installs - a.installs;
+      return a.name.localeCompare(b.name);
+    });
+  } else if (sortKey === "new") {
+    // Created-time desc; alphabetical tiebreak. Empty createdTime
+    // (local drafts) sorts last because empty strings come after ISO
+    // timestamps in lexicographic descending order.
+    filtered.sort((a, b) => {
+      if (a.createdTime !== b.createdTime) {
+        return b.createdTime.localeCompare(a.createdTime);
+      }
       return a.name.localeCompare(b.name);
     });
   } else {

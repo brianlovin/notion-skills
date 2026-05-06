@@ -64,7 +64,7 @@ program
   .option("--outdated", "only installed skills with newer versions in the store")
   .option("--drafts", "only local drafts (not yet published)")
   .option("--tag <tag...>", "filter by tag (repeatable; matches all)")
-  .option("--sort <key>", "sort order: name (default) or popular (by install count, descending)", "name")
+  .option("--sort <key>", "sort order: name (default), popular (by install count), new (most recently created)", "name")
   .option("--json", "machine-readable JSON output")
   .action(listCommand);
 

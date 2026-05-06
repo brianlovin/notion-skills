@@ -75,7 +75,8 @@ notion-skills list --outdated       # only installed-and-outdated
 notion-skills list --drafts         # only local drafts (not yet published)
 notion-skills list --available      # only in store but not installed
 notion-skills list --tag <name>     # filter by tag
-notion-skills list --sort popular   # popular first (alias: --sort installs)
+notion-skills list --sort popular   # popular first (synonyms: installs, downloads)
+notion-skills list --sort new       # most recently created first (synonyms: latest, recent)
 notion-skills list --json           # machine-readable
 ```
 
