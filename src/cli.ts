@@ -20,6 +20,7 @@ import { uninstallCommand } from "./commands/uninstall.js";
 import { unpublishCommand } from "./commands/unpublish.js";
 import { openCommand } from "./commands/open.js";
 import { auditCommand } from "./commands/audit.js";
+import { addCommand } from "./commands/add.js";
 import {
   sourceAddCommand,
   sourceDefaultCommand,
@@ -113,6 +114,18 @@ program
   .argument("<input>", "URL, file path, or natural-language description")
   .option("--agent <key>", "override the configured coding agent (claude, codex, opencode, gemini)")
   .action(genCommand);
+
+program
+  .command("add")
+  .description("Pull a skill from a public GitHub repo into the central store as a local draft. Mirrors `npx skills add` syntax.")
+  .argument("<ref>", "GitHub source: `owner/repo`, `owner/repo@skill`, `owner/repo#ref`, or full URL")
+  .option("--skill <name...>", "filter to one or more skills in a multi-skill repo")
+  .option("--preview", "print skill metadata + body without writing to disk")
+  .option("--as <name>", "override the local slug (single-skill add only)")
+  .option("--publish", "after add, publish straight to a Notion source")
+  .option("--source <key>", "source for --publish (default: default source)")
+  .option("-y, --yes", "skip prompts (multi-skill repos add all)")
+  .action((ref, opts) => addCommand([ref], opts));
 
 program
   .command("install")

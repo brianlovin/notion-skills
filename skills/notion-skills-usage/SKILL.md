@@ -11,7 +11,7 @@ description: >
   init, upgrade, open, import, source.
 type: core
 library: notion-skills
-library_version: "0.13.1"
+library_version: "0.14.0"
 sources:
   - README.md
   - CLAUDE.md
@@ -42,6 +42,8 @@ The verb mapping:
 | User intent | Verb |
 |---|---|
 | Author a new skill via the user's coding agent | `gen <input>` |
+| Pull a public skill from GitHub | `add <owner/repo>` (mirrors `npx skills add` syntax) |
+| Audit skill quality (npm-audit-style) | `audit [slugs...]` |
 | Push local edits or new skills to the team store | `publish <slug>` (or `--all`) |
 | See what's available + what's installed | `list` |
 | Pull a skill from the store onto this machine | `install <slug>` (or `--tag <name>`, or `--all`) |
@@ -124,6 +126,18 @@ notion-skills sync
 ```
 
 `sync` is pull-only. If the user has local edits, `sync` prints a "you have local edits — run `publish`" reminder per drifted skill but **does not** push or overwrite. If the user has BOTH local edits AND the page changed remotely, `sync` backs up the local file to `~/.notion-skills/backup/sync-overwrite-<ts>/` before pulling.
+
+### Pull a public skill from GitHub
+
+```bash
+notion-skills add vercel-labs/agent-skills                       # all skills in the repo
+notion-skills add vercel-labs/agent-skills@web-design-guidelines # one specific skill
+notion-skills add owner/repo#v1.2.0                              # pin to a tag/branch
+notion-skills add owner/repo --preview                           # see content without writing
+notion-skills add owner/repo --publish --source team             # add + push to a Notion source
+```
+
+Mirrors [skills.sh](https://skills.sh) syntax for cross-ecosystem familiarity. Lands as a local draft; the user runs `publish` (or passes `--publish`) to push to a Notion source. Origin (`owner/repo#ref`) is recorded in `metadata.origin` and round-trips as a Notion column for provenance.
 
 ### Generate a new skill
 

@@ -50,6 +50,8 @@ Requires macOS or Linux and Node.js 18+.
 | `uninstall <slug>` | Remove from your machine. The Notion page stays. |
 | `sync` | Pull updates for installed skills across every source. |
 | `gen <input>` | Generate a new skill from a URL, file, or prompt. Local-only until you `publish`. |
+| `add <owner/repo>` | Pull a public skill from a GitHub repo (mirrors [skills.sh](https://skills.sh) syntax). Lands as a local draft; `--publish` chains straight to a Notion source. |
+| `audit [slugs...]` | Quality checks (description, body, test markers, agent-routing keywords). Like `npm audit`. |
 | `publish <slug>` | Push a local skill (or edits) to the store. Bulk: `--all`. Source picker fires for new drafts when 2+ sources exist; `--source` skips. |
 | `unpublish <slug>` | Archive a skill in the store. |
 | `open <slug>` | Open the skill in Notion. Use `--local` to open the file in your editor. |
