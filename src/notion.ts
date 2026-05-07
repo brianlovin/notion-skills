@@ -181,11 +181,17 @@ export class NotionClient {
   }
 
   /**
-   * Archive (soft-delete) a page. Used to retire orphaned child
-   * pages whose underlying file no longer exists locally.
+   * Soft-delete a page (move to trash). Used by `unpublish` and to
+   * retire orphaned child pages whose underlying file no longer
+   * exists locally.
+   *
+   * The Notion API uses `in_trash`, not the legacy `archived` field —
+   * a PATCH with `{archived: true}` returns 400 ("body.archived
+   * should be not present"). Read paths handle both since the API
+   * still returns `archived` on older pages.
    */
   async archivePage(pageId: string): Promise<void> {
-    await this.request("PATCH", `/v1/pages/${pageId}`, { archived: true });
+    await this.request("PATCH", `/v1/pages/${pageId}`, { in_trash: true });
   }
 
   /**
