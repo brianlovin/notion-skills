@@ -4,6 +4,13 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { confirm } from "@inquirer/prompts";
 import {
+  type MissingClassification,
+  type MissingSourceRecord,
+  classifyMissing,
+  isNotionNotFound,
+} from "./missing-source.js";
+import { applySourceRemoval } from "./source-state.js";
+import {
   NotionClient,
   type NotionPage,
   readRichText,
@@ -57,6 +64,8 @@ export interface SyncSummary {
   conflicts: { name: string; target: string }[];
   /** Per-skill detail when both sides changed since last sync. */
   resolutions: ConflictResolution[];
+  /** Sources that 404'd during this sync, with classification. */
+  missingSources: MissingSourceRecord[];
 }
 
 export interface ConflictResolution {
@@ -134,6 +143,7 @@ export async function runSync(
     invalid: [],
     conflicts: [],
     resolutions: [],
+    missingSources: [],
   };
 
   if (scope.sources.length === 0) {
@@ -142,11 +152,131 @@ export async function runSync(
 
   // Iterate every configured source. Each source's pages are scoped to
   // its data_source_id; the manifest carries source_key per entry so
-  // we know which entries are in scope at each step.
+  // we know which entries are in scope at each step. Per-source try/
+  // catch lets a deleted (404'd) source be surfaced + (optionally)
+  // disconnected without aborting sync for the healthy sources behind
+  // it in the loop.
+  let succeededCount = 0;
+  const missingErrors: { source: Source; raw: string }[] = [];
   for (const source of scope.sources) {
-    await runSyncForSource(client, scope, source, summary, options, { log, warn, quiet });
+    try {
+      await runSyncForSource(client, scope, source, summary, options, { log, warn, quiet });
+      succeededCount++;
+    } catch (err) {
+      if (isNotionNotFound(err)) {
+        missingErrors.push({
+          source,
+          raw: err instanceof Error ? err.message : String(err),
+        });
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  if (missingErrors.length > 0) {
+    const classification = classifyMissing({
+      succeededCount,
+      missingCount: missingErrors.length,
+    });
+    for (const m of missingErrors) {
+      summary.missingSources.push({
+        key: m.source.key,
+        classification,
+        raw: m.raw,
+      });
+    }
+    if (!quiet) {
+      await handleMissingSources(scope, missingErrors, classification, { log, warn, quiet });
+    }
   }
   return summary;
+}
+
+/**
+ * Resolve sources that 404'd during sync. In TTY mode, prompt to
+ * disconnect each one (skills stay as drafts via `applySourceRemoval`'s
+ * "keep" mode). In non-TTY mode, surface an actionable next step. For
+ * the ambiguous case (no source succeeded — could be a workspace
+ * mismatch), warn and leave the config alone.
+ */
+async function handleMissingSources(
+  scope: Scope,
+  missing: { source: Source; raw: string }[],
+  classification: MissingClassification,
+  io: SyncIO,
+): Promise<void> {
+  if (classification === "ambiguous") {
+    io.warn("");
+    io.warn(
+      chalk.yellow(
+        `⚠ Couldn't reach ${missing.length} ${missing.length === 1 ? "source" : "sources"} in Notion:`,
+      ),
+    );
+    for (const m of missing) io.warn(chalk.dim(`    - ${m.source.key}`));
+    io.warn(
+      chalk.dim(
+        `  Most likely \`ntn\` is signed into a different workspace. Run \`ntn whoami\` to check.`,
+      ),
+    );
+    io.warn(
+      chalk.dim(
+        `  If you actually deleted ${missing.length === 1 ? "it" : "them"} in Notion, run \`notion-skills source remove <key>\` for each.`,
+      ),
+    );
+    return;
+  }
+
+  for (const m of missing) {
+    const installedCount = await countInstalledFromSource(scope, m.source.key);
+    io.warn("");
+    io.warn(
+      chalk.yellow(`⚠ Source "${m.source.key}" was deleted in Notion.`),
+    );
+
+    if (process.stdin.isTTY) {
+      const ok = await confirm({
+        message: disconnectPrompt(m.source.key, installedCount),
+        default: true,
+      });
+      if (ok) {
+        await applySourceRemoval(scope, m.source.key, "keep");
+        io.log(chalk.green(disconnectSuccess(m.source.key, installedCount)));
+      } else {
+        io.warn(chalk.dim(`  Kept "${m.source.key}" in your config. ${remindCommand(m.source.key, installedCount)}`));
+      }
+    } else {
+      io.warn(chalk.dim(`  ${remindCommand(m.source.key, installedCount)}`));
+    }
+  }
+}
+
+function disconnectPrompt(key: string, installedCount: number): string {
+  if (installedCount === 0) return `Disconnect "${key}" locally?`;
+  const noun = installedCount === 1 ? "skill" : "skills";
+  const draft = installedCount === 1 ? "a local draft" : "local drafts";
+  return `Disconnect "${key}" locally? ${installedCount} ${noun} will stay as ${draft}.`;
+}
+
+function disconnectSuccess(key: string, installedCount: number): string {
+  if (installedCount === 0) return `✓ Disconnected "${key}".`;
+  const noun = installedCount === 1 ? "skill" : "skills";
+  const draft = installedCount === 1 ? "a local draft" : "local drafts";
+  return `✓ Disconnected "${key}". ${installedCount} ${noun} kept as ${draft}.`;
+}
+
+function remindCommand(key: string, installedCount: number): string {
+  if (installedCount === 0) {
+    return `Run \`notion-skills source remove ${key}\` to disconnect.`;
+  }
+  const noun = installedCount === 1 ? "skill" : "skills";
+  const draft = installedCount === 1 ? "a local draft" : "local drafts";
+  return `Run \`notion-skills source remove ${key} --keep-skills\` to disconnect (${installedCount} ${noun} will stay as ${draft}).`;
+}
+
+async function countInstalledFromSource(scope: Scope, key: string): Promise<number> {
+  const manifest = await loadOrEmptyManifest(scope);
+  return Object.values(manifest.skills).filter((e) => e.source_key === key).length;
 }
 
 /**
@@ -459,9 +589,15 @@ async function pullPages(
   showDiff: boolean,
 ): Promise<void> {
   if (toFetch.length === 0) return;
-  log(chalk.dim(`Pulling ${toFetch.length} ${toFetch.length === 1 ? "page" : "pages"}:`));
 
+  // Collect outcomes first, then print. Multi-file skills are
+  // force-refetched on every sync (Notion doesn't reliably bump the
+  // parent's last_edited_time on child edits) — so the fetch happens
+  // unconditionally, but the report should only mention skills whose
+  // content actually changed. A noisy "Updated: tdd-test" on a sync
+  // where nothing changed is a lie about what the user got.
   const verbose = process.env.NOTION_SKILLS_DEBUG === "1";
+  const outcomes: PullOutcome[] = [];
   for (const summaryPage of toFetch) {
     if (verbose) console.error(`Fetching "${summaryPage.title}" (${summaryPage.id})...`);
     const page = pages.find((p) => p.id === summaryPage.id)!;
@@ -471,17 +607,44 @@ async function pullPages(
       log(`  ${chalk.yellow("!")} ${summaryPage.title} ${chalk.dim(`(${converted.reason})`)}`);
       continue;
     }
-    await applySkillPullResult(
-      converted.skill,
-      source,
-      manifest,
-      kept,
-      contentRoot,
-      summary,
-      log,
-      showDiff,
+    outcomes.push(
+      await applySkillPullResult(
+        converted.skill,
+        source,
+        manifest,
+        kept,
+        contentRoot,
+        showDiff,
+      ),
     );
   }
+
+  const changes = outcomes.filter((o) => o.kind !== "unchanged");
+  if (changes.length > 0) {
+    log(chalk.dim(`Pulling ${changes.length} ${changes.length === 1 ? "page" : "pages"}:`));
+    for (const c of changes) {
+      if (c.kind === "created") {
+        summary.created.push(c.localSlug);
+        log(`  ${chalk.green("+")} ${c.localSlug}`);
+      } else {
+        summary.updated.push(c.localSlug);
+        log(`  ${chalk.cyan("↓")} ${c.localSlug}`);
+      }
+      if (c.previous !== null) logSkillDiff(c.previous, c.next, log);
+    }
+  }
+  for (const o of outcomes) {
+    if (o.kind === "unchanged") summary.unchanged.push(o.localSlug);
+  }
+}
+
+interface PullOutcome {
+  localSlug: string;
+  kind: "created" | "updated" | "unchanged";
+  /** Pre-overwrite on-disk content for diff rendering, or null. */
+  previous: string | null;
+  /** New SKILL.md content we just wrote. */
+  next: string;
 }
 
 async function applySkillPullResult(
@@ -490,10 +653,8 @@ async function applySkillPullResult(
   manifest: Manifest,
   kept: PageSummary[],
   contentRoot: string,
-  summary: SyncSummary,
-  log: (s: string) => void,
   showDiff: boolean,
-): Promise<void> {
+): Promise<PullOutcome> {
   const md = buildSkillMarkdown({ properties: skill.properties, body: skill.body });
   const sourceSlug = skill.properties.name;
   // Preserve local_slug across re-fetches by matching on stable
@@ -506,6 +667,14 @@ async function applySkillPullResult(
   const skillDir = join(contentRoot, localSlug);
   const skillFile = join(skillDir, "SKILL.md");
 
+  const newBodyHash = hashSkillContent(skill.body, skill.files);
+  const newLocalHash = hashSkillContent(md, skill.files);
+  const previousEntry = existing?.[1];
+  const contentChanged =
+    !previousEntry ||
+    previousEntry.body_hash !== newBodyHash ||
+    previousEntry.local_hash !== newLocalHash;
+
   // Capture the previous content for diff rendering BEFORE we
   // overwrite. Only diff when local_hash matches manifest's record —
   // that means the on-disk file IS the last-synced content, so a diff
@@ -513,8 +682,7 @@ async function applySkillPullResult(
   // user has local edits (hash mismatch), skip the diff: their changes
   // would conflate with Notion's, producing noise.
   let previousContent: string | null = null;
-  const previousEntry = existing?.[1];
-  if (showDiff && previousEntry?.local_hash) {
+  if (showDiff && contentChanged && previousEntry?.local_hash) {
     try {
       const onDisk = await readFile(skillFile, "utf8");
       if (hashContent(onDisk) === previousEntry.local_hash) {
@@ -529,10 +697,6 @@ async function applySkillPullResult(
   await writeFile(skillFile, md, "utf8");
   await materializeFiles(skillDir, skill.files);
 
-  const wasNew = !existing;
-  if (wasNew) summary.created.push(localSlug);
-  else summary.updated.push(localSlug);
-
   const matchingSummary = kept.find((k) => k.id === skill.pageId);
   manifest.skills[localSlug] = {
     source_key: source.key,
@@ -540,15 +704,18 @@ async function applySkillPullResult(
     page_id: skill.pageId,
     last_edited_time: skill.lastEditedTime,
     props_hash: matchingSummary?.propsHash ?? "",
-    body_hash: hashSkillContent(skill.body, skill.files),
-    local_hash: hashSkillContent(md, skill.files),
+    body_hash: newBodyHash,
+    local_hash: newLocalHash,
     files: skill.files.map((f) => f.path).sort(),
   };
 
-  log(`  ${wasNew ? chalk.green("+") : chalk.cyan("↓")} ${localSlug}`);
-  if (previousContent !== null) {
-    logSkillDiff(previousContent, md, log);
-  }
+  const wasNew = !existing;
+  const kind: PullOutcome["kind"] = wasNew
+    ? "created"
+    : contentChanged
+      ? "updated"
+      : "unchanged";
+  return { localSlug, kind, previous: previousContent, next: md };
 }
 
 function logSkillDiff(

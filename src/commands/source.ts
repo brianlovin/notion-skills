@@ -1,14 +1,11 @@
 import chalk from "chalk";
-import { confirm, input, select } from "@inquirer/prompts";
-import { existsSync } from "node:fs";
-import { rm } from "node:fs/promises";
-import { join } from "node:path";
+import { input, select } from "@inquirer/prompts";
 import { getScope, writeScope } from "../scope.js";
 import { NotionClient } from "../notion.js";
 import { assertNtnInstalled } from "../ntn.js";
-import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
+import { MANIFEST_FILE } from "../paths.js";
 import { readManifest, writeManifest } from "../manifest.js";
-import { targetSkillPath, removeSymlink, targetsForKeys } from "../targets.js";
+import { applySourceRemoval } from "../source-state.js";
 import {
   type Source,
   defaultSource,
@@ -187,34 +184,18 @@ export async function sourceRemoveCommand(
     }
   }
 
-  // Apply.
-  if (manifest) {
-    if (mode === "uninstall") {
-      const targets = targetsForKeys(scope.targets);
-      for (const [localSlug] of installedFromSource) {
-        const dir = join(SKILLS_STORE, localSlug);
-        if (existsSync(dir)) await rm(dir, { recursive: true, force: true });
-        for (const t of targets) {
-          await removeSymlink(targetSkillPath(t, localSlug));
-        }
-      }
-    }
-    // Both modes: drop the manifest entries for this source. Keep mode
-    // leaves the on-disk dirs and symlinks (they become local drafts).
-    for (const [localSlug] of installedFromSource) {
-      delete manifest.skills[localSlug];
-    }
-    await writeManifest(MANIFEST_FILE, manifest);
+  // Apply via the shared helper. "no-skills" still drops the source
+  // from scope; nothing to do at the manifest/filesystem level.
+  if (mode === "no-skills") {
+    scope.sources = scope.sources.filter((s) => s.key !== key);
+    await writeScope({
+      sources: scope.sources,
+      targets: scope.targets,
+      gen_agent: scope.gen_agent,
+    });
+  } else {
+    await applySourceRemoval(scope, key, mode);
   }
-
-  // Drop from scope. If we're removing the default, leave the rest
-  // without a default — user must explicitly set a new one.
-  scope.sources = scope.sources.filter((s) => s.key !== key);
-  await writeScope({
-    sources: scope.sources,
-    targets: scope.targets,
-    gen_agent: scope.gen_agent,
-  });
 
   console.log(chalk.green(`✓ Removed source "${key}"${target.default ? " (was default — set a new one with `source default <key>`)" : ""}`));
   if (mode === "uninstall") {
