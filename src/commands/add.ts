@@ -21,6 +21,7 @@ import {
 import { auditSkill, loadAuditTarget, summariseIssues } from "../audit.js";
 import { pickSource } from "./_resolve.js";
 import { injectMetadataKey, parseFrontmatter } from "../frontmatter.js";
+import { classifyExtension } from "../skill-files.js";
 
 interface AddOptions {
   /** Filter to one or more skills in a multi-skill repo (also: `owner/repo@skill`). */
@@ -539,14 +540,17 @@ function buildAddPlan(
 
     if (override) {
       // `--as` is the user's explicit name. We honour it OR refuse —
-      // never silently pick a different one.
-      if (taken(override)) {
+      // never silently pick a different one. Pass through the same
+      // normalisation as auto-derived slugs so case-insensitive
+      // filesystems don't see `Foo` and `foo` as different.
+      const normedOverride = norm(override);
+      if (taken(normedOverride)) {
         throw new Error(
-          `--as "${override}" is already taken on this machine. Pick a different name, or run \`notion-skills uninstall ${override}\` first.`,
+          `--as "${normedOverride}" is already taken on this machine. Pick a different name, or run \`notion-skills uninstall ${normedOverride}\` first.`,
         );
       }
-      inFlight.add(override);
-      plan.push({ hydrated: c, action: "install-new", proposedSlug: override });
+      inFlight.add(normedOverride);
+      plan.push({ hydrated: c, action: "install-new", proposedSlug: normedOverride });
       continue;
     }
 
@@ -680,14 +684,31 @@ async function materialiseSkill(
 
   // Write every sibling file at its repo-relative path. We strip the
   // `<skillDir>/` prefix so relative paths land correctly under the
-  // local skill dir. Failed fetches are logged so the user knows the
-  // skill is missing pieces rather than silently incomplete.
+  // local skill dir.
+  //
+  // Skip files whose extension we don't recognise as markdown or
+  // source code: fetching a PDF / PNG / .docx / etc. via raw.github
+  // returns the bytes as a UTF-8 string, which would corrupt the
+  // file when we write back. Same classifier publish uses to
+  // round-trip multi-file skills, so what we accept here matches
+  // what we can later push to Notion.
   for (const sibling of skill.siblingFiles) {
     const rel =
       skill.skillDir === ""
         ? sibling.path
         : sibling.path.slice(skill.skillDir.length + 1);
     if (rel.startsWith("..") || rel.length === 0) continue;
+
+    const cls = classifyExtension(rel);
+    if (cls.kind === "unsupported") {
+      console.log(
+        chalk.yellow(
+          `    ⚠ ${rel}: unsupported file type — skipped (binary content would corrupt on text fetch).`,
+        ),
+      );
+      continue;
+    }
+
     const dest = join(dir, rel);
     await mkdir(dirname(dest), { recursive: true });
     const content = await fetchFileContent(source, ref, sibling.path);
