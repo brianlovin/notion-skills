@@ -120,7 +120,11 @@ export async function addCommand(refs: string[], opts: AddOptions = {}): Promise
     return;
   }
 
-  const picked = await pickSkillsForAdd(hydrated, opts);
+  const picked = await pickSkillsForAdd(
+    hydrated,
+    opts,
+    formatSourceRef({ ...source, ref }),
+  );
   if (picked.length === 0) {
     console.log(chalk.dim("Nothing to add."));
     return;
@@ -401,7 +405,11 @@ async function renderPreview(
 
 // ---------- picker ----------
 
-async function pickSkillsForAdd(skills: HydratedSkill[], opts: AddOptions): Promise<HydratedSkill[]> {
+async function pickSkillsForAdd(
+  skills: HydratedSkill[],
+  opts: AddOptions,
+  sourceRef: string,
+): Promise<HydratedSkill[]> {
   if (skills.length === 1) return skills;
   if (opts.yes) return skills; // bulk-confirm = "all"
 
@@ -421,15 +429,39 @@ async function pickSkillsForAdd(skills: HydratedSkill[], opts: AddOptions): Prom
     );
   }
 
-  const choices = skills.map((s) => ({
-    name: `${s.frontmatterName ?? s.skillName}${s.description ? chalk.dim(` — ${truncate(oneLine(s.description), 70)}`) : ""}`,
-    value: s,
-    checked: true,
-  }));
+  // Inquirer's checkbox already handles 'a' (toggle-all) and 'i'
+  // (invert) — we just have to mention them in the help text so
+  // users discover the shortcuts. With every skill pre-checked, the
+  // common "I want all of them" path is just <enter>; the "I want
+  // just two" path is 'a' (deselect all) then <space> the picks.
+  const cols = process.stdout.columns ?? 100;
+  const longestName = Math.max(
+    ...skills.map((s) => (s.frontmatterName ?? s.skillName).length),
+  );
+  const namePad = Math.min(40, longestName + 2);
+  const descMax = Math.max(20, cols - namePad - 12);
+
+  const choices = skills.map((s) => {
+    const name = (s.frontmatterName ?? s.skillName).padEnd(namePad);
+    const desc = s.description
+      ? chalk.dim(` ${truncate(oneLine(s.description), descMax)}`)
+      : "";
+    return { name: `${name}${desc}`, value: s, checked: true };
+  });
+
   return (await checkbox({
-    message: `Pick which skills to add (${skills.length} found):`,
+    message: `Skills from ${chalk.bold(sourceRef)} ${chalk.dim(`(${skills.length} found, all selected)`)}`,
+    instructions: chalk.dim(
+      "  ↑↓ navigate · <space> toggle · 'a' all/none · 'i' invert · <enter> confirm · ^C cancel",
+    ),
     choices,
-    pageSize: Math.min(20, choices.length + 2),
+    pageSize: Math.min(25, choices.length + 2),
+    theme: {
+      // Show the help line on every render — by default inquirer
+      // only shows it on first paint, and the shortcuts are exactly
+      // what we want users to discover as they navigate.
+      helpMode: "always",
+    },
   })) as HydratedSkill[];
 }
 
