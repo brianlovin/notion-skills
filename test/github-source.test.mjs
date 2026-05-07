@@ -140,6 +140,57 @@ test("decodes URL-encoded refs", () => {
   assert.equal(parseGitHubSource("owner/repo#feature%20branch").ref, "feature branch");
 });
 
+test("malformed % escapes degrade gracefully (no crash)", () => {
+  // Bare decodeURIComponent throws "URI malformed" on a lone `%`. We
+  // want to hand the raw value back instead of crashing the CLI.
+  assert.equal(parseGitHubSource("owner/repo#feature%").ref, "feature%");
+});
+
+test("URL with query string parses correctly (query is dropped)", () => {
+  // GitHub UI sometimes adds query params (e.g. ?ref_type=...). Our
+  // earlier regex-based parser matched up to the first `?` and
+  // failed; the URL-constructor path now handles them naturally.
+  assert.deepEqual(
+    parseGitHubSource("https://github.com/vercel-labs/agent-skills?ref=copy-link"),
+    { owner: "vercel-labs", repo: "agent-skills" },
+  );
+});
+
+test("URL with query string + tree path parses correctly", () => {
+  assert.deepEqual(
+    parseGitHubSource(
+      "https://github.com/vercel-labs/agent-skills/tree/main/skills/foo?utm=share",
+    ),
+    {
+      owner: "vercel-labs",
+      repo: "agent-skills",
+      ref: "main",
+      subpath: "skills/foo",
+    },
+  );
+});
+
+test("URL with non-github.com host is rejected", () => {
+  assert.throws(
+    () => parseGitHubSource("https://gitlab.com/owner/repo"),
+    /Only github\.com/,
+  );
+});
+
+test("URL with www.github.com is accepted", () => {
+  assert.deepEqual(parseGitHubSource("https://www.github.com/owner/repo"), {
+    owner: "owner",
+    repo: "repo",
+  });
+});
+
+test("malformed URL is reported as unrecognised source", () => {
+  assert.throws(
+    () => parseGitHubSource("https://[badhost"),
+    /Unrecognised source/,
+  );
+});
+
 // ---------- formatSourceRef ----------
 
 test("formatSourceRef: bare shorthand round-trips", () => {

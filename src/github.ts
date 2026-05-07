@@ -32,10 +32,12 @@ export interface ParsedGitHubSource {
 }
 
 const HEAD_FRAGMENT_RE = /^([^#@]+)(?:#([^@]*))?(?:@(.+))?$/;
-// `tree/<ref>/<path>` (folder view) and `blob/<ref>/<path>` (file
-// view) are both interesting — users paste either depending on
-// where they were in the GitHub UI when they grabbed the link.
-const TREE_URL_RE = /^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?(?:\/(?:tree|blob)\/([^/]+)(?:\/(.+))?)?\/?$/;
+// Regex for the path-only portion of a GitHub URL, after the URL
+// constructor has stripped the protocol/host/query/fragment.
+// `tree/<ref>/<path>` is the folder view; `blob/<ref>/<path>` is the
+// file view — users paste either depending on where they were in
+// the GitHub UI.
+const URL_PATH_RE = /^([^/]+)\/([^/]+?)(?:\.git)?(?:\/(?:tree|blob)\/([^/]+)(?:\/(.+))?)?$/;
 const SHORT_RE = /^([^/]+)\/([^/#@]+)(?:\/(.+?))?$/;
 const SSH_RE = /^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/;
 
@@ -61,10 +63,26 @@ export function parseGitHubSource(input: string): ParsedGitHubSource {
     return parseGitHubSource(trimmed.slice("github:".length));
   }
 
-  // Full URL form (https://github.com/...).
-  const urlMatch = trimmed.match(TREE_URL_RE);
-  if (urlMatch) {
-    const [, owner, repo, ref, subpath] = urlMatch;
+  // Full URL form (https://github.com/...). Use the URL constructor
+  // so query strings + URL fragments don't trip the path regex —
+  // pasting `https://github.com/owner/repo?something=...` is common
+  // when grabbing links from GitHub's filtered views.
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    let u: URL;
+    try {
+      u = new URL(trimmed);
+    } catch {
+      throw new Error(`Unrecognised source "${input}". Use \`owner/repo\` or a GitHub URL.`);
+    }
+    if (u.hostname !== "github.com" && u.hostname !== "www.github.com") {
+      throw new Error(`Only github.com URLs are supported (got ${u.hostname}).`);
+    }
+    const path = u.pathname.replace(/^\/+/, "").replace(/\/+$/, "");
+    const m = path.match(URL_PATH_RE);
+    if (!m) {
+      throw new Error(`Unrecognised source "${input}". Expected \`/owner/repo\` or \`/owner/repo/(tree|blob)/<ref>[/<path>]\`.`);
+    }
+    const [, owner, repo, ref, subpath] = m;
     return cleanSource({ owner: owner!, repo: repo!, ref, subpath });
   }
 
@@ -111,10 +129,23 @@ function cleanSource(source: ParsedGitHubSource): ParsedGitHubSource {
   return {
     owner: source.owner,
     repo,
-    ...(source.ref !== undefined ? { ref: decodeURIComponent(source.ref) } : {}),
+    ...(source.ref !== undefined ? { ref: safeDecodeURI(source.ref) } : {}),
     ...(trimmed && trimmed.length > 0 ? { subpath: trimmed.join("/") } : {}),
     ...(source.skillFilter !== undefined ? { skillFilter: source.skillFilter } : {}),
   };
+}
+
+/**
+ * decodeURIComponent throws on malformed percent escapes (e.g. a
+ * lone `%`). For ref names we'd rather degrade gracefully — the
+ * original raw string is more useful to the user than a crash.
+ */
+function safeDecodeURI(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
 }
 
 /**
@@ -288,6 +319,21 @@ function readGitHubToken(): string | null {
   return null;
 }
 
+/**
+ * Thrown by ghFetch when GitHub responds with a rate-limit signal —
+ * either an explicit 429 or a 403 with `x-ratelimit-remaining: 0`.
+ * The CLI surfaces the message + a hint to set GITHUB_TOKEN, and
+ * (in `add`'s per-skill loop) lets the rest of the batch continue.
+ */
+export class GitHubRateLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GitHubRateLimitError";
+  }
+}
+
+const FETCH_TIMEOUT_MS = 10_000;
+
 async function ghFetch(url: string): Promise<Response> {
   const headers: Record<string, string> = {
     "User-Agent": "notion-skills",
@@ -295,5 +341,34 @@ async function ghFetch(url: string): Promise<Response> {
   };
   const token = readGitHubToken();
   if (token) headers.Authorization = `Bearer ${token}`;
-  return await fetch(url, { headers });
+
+  // AbortSignal.timeout (Node 17.3+) caps any single fetch — a hung
+  // CDN or stuck connection can't block the whole add forever.
+  let res: Response;
+  try {
+    res = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  } catch (err) {
+    if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+      throw new Error(
+        `GitHub fetch timed out after ${FETCH_TIMEOUT_MS / 1000}s (${url}).`,
+      );
+    }
+    throw err;
+  }
+
+  // GitHub returns 403 with x-ratelimit-remaining: 0 for anonymous
+  // rate limits, and 429 for secondary limits. Both look like
+  // "request failed" but the user's recovery is the same: wait, or
+  // set GITHUB_TOKEN. Distinguish them from 404 ("file missing")
+  // which is a normal probe outcome.
+  if (res.status === 429 || (res.status === 403 && res.headers.get("x-ratelimit-remaining") === "0")) {
+    const reset = res.headers.get("x-ratelimit-reset");
+    const resetMsg = reset
+      ? ` Resets at ${new Date(Number(reset) * 1000).toLocaleTimeString()}.`
+      : "";
+    throw new GitHubRateLimitError(
+      `GitHub rate limit hit (${res.status}).${resetMsg} Set GITHUB_TOKEN (or run \`gh auth login\`) for higher limits.`,
+    );
+  }
+  return res;
 }
