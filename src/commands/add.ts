@@ -1,13 +1,18 @@
 import chalk from "chalk";
-import { lstatSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { existsSync, lstatSync } from "node:fs";
+import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { checkbox } from "@inquirer/prompts";
+import { checkbox, confirm } from "@inquirer/prompts";
 import { getScope } from "../scope.js";
-import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
+import { MANIFEST_FILE, ROOT_DIR, SKILLS_STORE } from "../paths.js";
 import { readManifest } from "../manifest.js";
 import { defaultSource } from "../sources.js";
-import { ensureSymlink, targetSkillPath, targetsForKeys } from "../targets.js";
+import {
+  ensureSymlink,
+  removeSymlink,
+  targetSkillPath,
+  targetsForKeys,
+} from "../targets.js";
 import { migrateCommand } from "./migrate.js";
 import {
   type ParsedGitHubSource,
@@ -35,6 +40,26 @@ interface AddOptions {
   source?: string;
   /** Skip prompts. */
   yes?: boolean;
+  /** Replace existing skills on collision (backs up first). Destructive — opt-in only. */
+  overwrite?: boolean;
+  /** Drop colliding skills silently; install only the new ones. */
+  skipExisting?: boolean;
+}
+
+/**
+ * Per-candidate decision made before any disk writes happen. Lets us
+ * render the full plan to the user (and get a single confirm) instead
+ * of surprising them with collisions skill-by-skill.
+ */
+type AddAction = "install-new" | "rename" | "overwrite" | "skip";
+
+interface AddPlanItem {
+  hydrated: HydratedSkill;
+  action: AddAction;
+  /** local_slug we'll write to (or that we're skipping). */
+  proposedSlug: string;
+  /** When action is "rename" or "overwrite": the existing slug we collide with. */
+  conflictWith?: string;
 }
 
 /**
@@ -133,62 +158,69 @@ export async function addCommand(refs: string[], opts: AddOptions = {}): Promise
     throw new Error("--as only applies when adding exactly one skill.");
   }
 
-  console.log(
-    chalk.bold(
-      `\nAdding ${picked.length} ${picked.length === 1 ? "skill" : "skills"}:`,
-    ),
-  );
+  if (opts.overwrite && opts.skipExisting) {
+    throw new Error("Pass either --overwrite or --skip-existing, not both.");
+  }
 
   const defaultKey =
     defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
   const manifest = await readManifest(MANIFEST_FILE, defaultKey);
 
+  // Classify every picked candidate up front. The user sees the full
+  // plan in a summary and confirms once; we never surprise them
+  // skill-by-skill.
+  const plan = buildAddPlan(picked, source, manifest, opts);
+  const sourceRef = formatSourceRef({ ...source, ref });
+  renderAddPlan(plan, sourceRef);
+
+  // Two failure modes from confirmAddPlan:
+  //   - "nothing to do": plan reduced to zero work (e.g. --skip-existing
+  //     with all collisions). That's a success — exit clean.
+  //   - "user declined": they pressed n at the prompt. Print Aborted.
+  const willActOn = plan.filter((p) => p.action !== "skip").length;
+  if (willActOn === 0) {
+    console.log(chalk.dim("Nothing to add."));
+    return;
+  }
+  if (!(await confirmAddPlan(plan, opts))) {
+    console.log(chalk.dim("Aborted."));
+    return;
+  }
+
   const addedSlugs: string[] = [];
   const failed: { name: string; reason: string }[] = [];
-  // Track in-flight slugs so two adds in the same batch can't claim
-  // the same name (would write into each other's dir otherwise).
-  const inFlight = new Set<string>();
-  for (const c of picked) {
-    const baseSlug = (c.frontmatterName ?? c.skillName).toLowerCase();
-    const { slug, namespaced } = pickAddSlug(
-      source.owner,
-      baseSlug,
-      manifest,
-      inFlight,
-      picked.length === 1 ? opts.as : undefined,
-    );
-    inFlight.add(slug);
-    // Per-skill try/catch: a network blip on one skill shouldn't tear
-    // down a bulk add. Mirrors the publish loop. Failures are listed
-    // at the end so the user can re-run on the failed subset.
+
+  for (const item of plan) {
+    if (item.action === "skip") continue;
     try {
-      await materialiseSkill(source, ref, c, slug);
-      await fanoutSymlinks(slug, scope.targets);
-      addedSlugs.push(slug);
-      const note = namespaced
-        ? chalk.yellow(" (collided with existing)")
-        : chalk.dim(` (from ${formatSourceRef({ ...source, ref })})`);
-      console.log(`  ${chalk.green("+")} ${slug}${note}`);
+      if (item.action === "overwrite") {
+        await backupExistingSkill(item.proposedSlug, scope.targets);
+      }
+      await materialiseSkill(source, ref, item.hydrated, item.proposedSlug);
+      await fanoutSymlinks(item.proposedSlug, scope.targets);
+      addedSlugs.push(item.proposedSlug);
+      const verb = item.action === "overwrite" ? chalk.cyan("↻") : chalk.green("+");
+      const note = renderActionNote(item, sourceRef);
+      console.log(`  ${verb} ${item.proposedSlug}${note}`);
     } catch (err) {
-      // On failure, drop any partial dir we may have created so the
-      // user doesn't end up with empty central-store entries.
-      const partial = join(SKILLS_STORE, slug);
+      const partial = join(SKILLS_STORE, item.proposedSlug);
       try {
-        const { rm } = await import("node:fs/promises");
         await rm(partial, { recursive: true, force: true });
       } catch {
         // best-effort cleanup
       }
-      failed.push({ name: slug, reason: (err as Error).message.split("\n")[0] ?? "unknown error" });
-      console.log(`  ${chalk.red("✗")} ${slug} ${chalk.dim(`(${(err as Error).message.split("\n")[0]})`)}`);
+      const reason = (err as Error).message.split("\n")[0] ?? "unknown error";
+      failed.push({ name: item.proposedSlug, reason });
+      console.log(`  ${chalk.red("✗")} ${item.proposedSlug} ${chalk.dim(`(${reason})`)}`);
     }
   }
 
   if (failed.length > 0) {
     console.log("");
+    const total = plan.filter((p) => p.action !== "skip").length;
     console.log(
       chalk.yellow(
-        `${failed.length} of ${picked.length} ${picked.length === 1 ? "skill" : "skills"} failed. Re-run with the same source to retry.`,
+        `${failed.length} of ${total} ${total === 1 ? "skill" : "skills"} failed. Re-run with the same source to retry.`,
       ),
     );
   }
@@ -468,25 +500,24 @@ async function pickSkillsForAdd(
 // ---------- materialise ----------
 
 /**
- * Pick the local_slug for a skill being added. Mirrors the
- * collision-then-namespace pattern of `chooseLocalSlug` (used by
- * install) but with the GitHub owner as the prefix instead of the
- * Notion source key, since that's what carries the most provenance
- * signal for an imported skill. Override always wins.
+ * Classify every picked candidate into an explicit action — never
+ * silently destructive. The default for a colliding skill is "rename"
+ * (auto-namespace, both versions kept). Users opt into destructive
+ * paths via flags:
+ *   --overwrite      → backup existing then replace
+ *   --skip-existing  → drop the colliding ones, install only news
  *
- * Collision targets:
- *   - manifest entries (already-installed skills)
- *   - on-disk dirs in the central store (drafts)
- *   - in-flight slugs (other skills being added in this same batch)
+ * The single-skill `--as` override applies before collision logic:
+ * if a user provided a name and it doesn't collide, just use it.
  */
-function pickAddSlug(
-  owner: string,
-  baseSlug: string,
+function buildAddPlan(
+  picked: HydratedSkill[],
+  source: ParsedGitHubSource,
   manifest: import("../manifest.js").Manifest | null,
-  inFlight: Set<string>,
-  override: string | undefined,
-): { slug: string; namespaced: boolean } {
+  opts: AddOptions,
+): AddPlanItem[] {
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9-]+/g, "-");
+  const inFlight = new Set<string>();
   const taken = (slug: string): boolean => {
     if (inFlight.has(slug)) return true;
     if (manifest?.skills[slug]) return true;
@@ -498,18 +529,48 @@ function pickAddSlug(
       return false;
     }
   };
-  if (override) {
-    if (taken(override)) {
-      // Even the override collides — fall through to numeric suffix.
-      return { slug: appendUntilFree(override, taken), namespaced: false };
+
+  const plan: AddPlanItem[] = [];
+  for (const c of picked) {
+    const baseSlug = norm(c.frontmatterName ?? c.skillName);
+    const override = picked.length === 1 ? opts.as : undefined;
+
+    // --as wins outright when it doesn't collide. If --as DOES
+    // collide, we fall through to the same flag/policy as a normal
+    // collision below.
+    if (override && !taken(override)) {
+      inFlight.add(override);
+      plan.push({ hydrated: c, action: "install-new", proposedSlug: override });
+      continue;
     }
-    return { slug: override, namespaced: false };
+
+    const desiredSlug = override ?? baseSlug;
+    if (!taken(desiredSlug)) {
+      inFlight.add(desiredSlug);
+      plan.push({ hydrated: c, action: "install-new", proposedSlug: desiredSlug });
+      continue;
+    }
+
+    // Collision. Pick the action from flags; default = rename.
+    if (opts.skipExisting) {
+      plan.push({ hydrated: c, action: "skip", proposedSlug: desiredSlug, conflictWith: desiredSlug });
+      continue;
+    }
+    if (opts.overwrite) {
+      inFlight.add(desiredSlug);
+      plan.push({ hydrated: c, action: "overwrite", proposedSlug: desiredSlug, conflictWith: desiredSlug });
+      continue;
+    }
+
+    // Default: rename via <owner>-<slug>, falling back to numeric
+    // suffix if THAT also collides (rare but possible after
+    // multi-org workflow).
+    const namespaced = norm(`${source.owner}-${baseSlug}`);
+    const renamed = !taken(namespaced) ? namespaced : appendUntilFree(namespaced, taken);
+    inFlight.add(renamed);
+    plan.push({ hydrated: c, action: "rename", proposedSlug: renamed, conflictWith: desiredSlug });
   }
-  const candidate = norm(baseSlug);
-  if (!taken(candidate)) return { slug: candidate, namespaced: false };
-  const namespaced = norm(`${owner}-${baseSlug}`);
-  if (!taken(namespaced)) return { slug: namespaced, namespaced: true };
-  return { slug: appendUntilFree(namespaced, taken), namespaced: true };
+  return plan;
 }
 
 function appendUntilFree(base: string, taken: (slug: string) => boolean): string {
@@ -518,6 +579,148 @@ function appendUntilFree(base: string, taken: (slug: string) => boolean): string
     if (!taken(candidate)) return candidate;
   }
   return `${base}-${Date.now().toString(36)}`;
+}
+
+/**
+ * Print the plan summary so the user sees what's about to happen
+ * before we touch any files. Quiet when there are no collisions —
+ * a flat add of new skills doesn't need ceremony.
+ */
+function renderAddPlan(plan: AddPlanItem[], sourceRef: string): void {
+  const news = plan.filter((p) => p.action === "install-new");
+  const renames = plan.filter((p) => p.action === "rename");
+  const overwrites = plan.filter((p) => p.action === "overwrite");
+  const skips = plan.filter((p) => p.action === "skip");
+  const hasCollisions = renames.length + overwrites.length + skips.length > 0;
+
+  console.log("");
+  console.log(chalk.bold(`Adding from ${sourceRef}:`));
+  if (news.length > 0) {
+    console.log(`  ${chalk.green("+")} ${news.length} new`);
+  }
+  if (renames.length > 0) {
+    console.log(
+      chalk.yellow(
+        `  ⚠ ${renames.length} ${renames.length === 1 ? "collides" : "collide"} with existing — will be renamed:`,
+      ),
+    );
+    const widest = Math.max(...renames.map((r) => (r.conflictWith ?? "").length));
+    for (const r of renames) {
+      console.log(
+        `      ${chalk.dim(r.conflictWith?.padEnd(widest) ?? "")} → ${r.proposedSlug}`,
+      );
+    }
+  }
+  if (overwrites.length > 0) {
+    console.log(
+      chalk.red(
+        `  ↻ ${overwrites.length} ${overwrites.length === 1 ? "will replace existing" : "will replace existing"} (backed up first):`,
+      ),
+    );
+    for (const o of overwrites) console.log(`      ${o.proposedSlug}`);
+  }
+  if (skips.length > 0) {
+    console.log(
+      chalk.dim(
+        `  ⊘ ${skips.length} skipped (already exists): ${skips.map((s) => s.conflictWith).join(", ")}`,
+      ),
+    );
+  }
+  // Hint shown only on the default rename path. If the user already
+  // chose --overwrite or --skip-existing they made a decision; don't
+  // nag.
+  if (renames.length > 0 && overwrites.length === 0 && skips.length === 0) {
+    console.log(
+      chalk.dim(
+        "  (use --overwrite to replace existing, --skip-existing to drop collisions)",
+      ),
+    );
+  }
+  void hasCollisions;
+}
+
+async function confirmAddPlan(plan: AddPlanItem[], opts: AddOptions): Promise<boolean> {
+  const overwrites = plan.some((p) => p.action === "overwrite");
+  const renames = plan.some((p) => p.action === "rename");
+  const needsConfirm = overwrites || renames;
+
+  if (opts.yes) return true;
+
+  // No collisions + --yes-eligible flat add → no need to nag.
+  if (!needsConfirm) return true;
+
+  if (!process.stdin.isTTY) {
+    // Non-TTY without --yes when collisions exist: refuse rather than
+    // proceed with a destructive (overwrite) or surprising (rename)
+    // action no one signed off on.
+    throw new Error(
+      [
+        "Collisions detected and stdin isn't a TTY. Choose explicitly:",
+        "  --yes              accept the plan above",
+        "  --overwrite        replace existing skills (with backup)",
+        "  --skip-existing    drop collisions, install only the new ones",
+      ].join("\n"),
+    );
+  }
+
+  return await confirm({
+    message: overwrites
+      ? "Continue? Existing skills will be backed up then replaced."
+      : "Continue?",
+    default: !overwrites,
+  });
+}
+
+function renderActionNote(item: AddPlanItem, sourceRef: string): string {
+  if (item.action === "rename") {
+    return chalk.yellow(` (was ${item.conflictWith} — kept alongside existing)`);
+  }
+  if (item.action === "overwrite") {
+    return chalk.dim(` (replaced existing; backed up to ~/.notion-skills/backup/)`);
+  }
+  return chalk.dim(` (from ${sourceRef})`);
+}
+
+/**
+ * Move an existing skill dir + its symlinks aside before an
+ * --overwrite replaces them. Mirrors the backup pattern used by
+ * uninstall so the user can recover from a mistaken --overwrite.
+ */
+async function backupExistingSkill(
+  localSlug: string,
+  targetKeys: string[],
+): Promise<void> {
+  const skillDir = join(SKILLS_STORE, localSlug);
+  if (!existsSync(skillDir)) return;
+  const backupRoot = join(
+    ROOT_DIR,
+    "backup",
+    `add-overwrite-${addBackupTimestamp()}`,
+  );
+  await mkdir(backupRoot, { recursive: true });
+  await cp(skillDir, join(backupRoot, localSlug), { recursive: true });
+
+  // Remove existing dir + agent symlinks so the new write lands
+  // cleanly. fanoutSymlinks below recreates them.
+  await rm(skillDir, { recursive: true, force: true });
+  const targets = targetsForKeys(targetKeys);
+  for (const t of targets) {
+    await removeSymlink(targetSkillPath(t, localSlug));
+  }
+}
+
+function addBackupTimestamp(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return (
+    d.getUTCFullYear().toString() +
+    pad(d.getUTCMonth() + 1) +
+    pad(d.getUTCDate()) +
+    "_" +
+    pad(d.getUTCHours()) +
+    pad(d.getUTCMinutes()) +
+    pad(d.getUTCSeconds())
+  );
 }
 
 async function materialiseSkill(

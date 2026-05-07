@@ -124,6 +124,8 @@ program
   .option("--as <name>", "override the local slug (single-skill add only)")
   .option("--publish", "after add, publish straight to a Notion source")
   .option("--source <key>", "source for --publish (default: default source)")
+  .option("--overwrite", "replace existing skills on collision (backed up first; destructive)")
+  .option("--skip-existing", "drop colliding skills silently; install only new ones")
   .option("-y, --yes", "skip prompts (multi-skill repos add all)")
   .action((ref, opts) => addCommand([ref], opts));
 
