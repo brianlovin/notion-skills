@@ -23,7 +23,7 @@ import {
   type SkillFile,
   upsertSkillFilePages,
 } from "../skill-files.js";
-import { startTask } from "./_progress.js";
+import { startTask, withSpinner } from "./_progress.js";
 import { pickSource } from "./_resolve.js";
 import type { Source } from "../sources.js";
 
@@ -199,9 +199,13 @@ async function discoverAndClassify(
   let classifications = await discoverSkills({ sourceDirs, trackedNames });
 
   // Conflict detection: the title slugs of pages currently in Notion.
-  if (verbose) process.stdout.write(chalk.dim("Checking Notion for existing skills... "));
-  const existing = await client.queryDataSource(source.data_source_id);
-  if (verbose) console.log(chalk.green("✓") + chalk.dim(` ${existing.length} pages`));
+  const existing = verbose
+    ? await withSpinner(
+        "Checking Notion for existing skills",
+        () => client.queryDataSource(source.data_source_id),
+        { noteFor: (p) => `${p.length} ${p.length === 1 ? "page" : "pages"}` },
+      )
+    : await client.queryDataSource(source.data_source_id);
 
   const existingByName = new Map<string, { pageId: string; title: string }>();
   const { slugify } = await import("../convert.js");

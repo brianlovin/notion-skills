@@ -3,6 +3,7 @@ import { getScope } from "../scope.js";
 import { NotionClient } from "../notion.js";
 import { assertNtnInstalled } from "../ntn.js";
 import { pickSource } from "./_resolve.js";
+import { withSpinner } from "./_progress.js";
 
 interface UpgradeOptions {
   source?: string;
@@ -27,9 +28,17 @@ export async function upgradeCommand(opts: UpgradeOptions = {}): Promise<void> {
     if (sources.length > 1) {
       console.log(chalk.bold(`\n${source.key}`) + chalk.dim(` — ${source.name}`));
     }
-    console.log(chalk.dim(`Inspecting "${source.name}" schema...`));
-    const { added, retyped } = await client.upgradeSchema(source.data_source_id);
-    await client.ensureDefaultViews(source.database_id, source.data_source_id);
+    const { added, retyped } = await withSpinner(
+      `Inspecting "${source.name}" schema`,
+      async () => {
+        const r = await client.upgradeSchema(source.data_source_id);
+        // Default views are reconciled as part of the same logical
+        // operation (both fix schema-side drift); group them under
+        // one spinner so the user sees one wait, not two.
+        await client.ensureDefaultViews(source.database_id, source.data_source_id);
+        return r;
+      },
+    );
 
     if (added.length === 0 && retyped.length === 0) {
       console.log(chalk.green("✓ Schema and views are up to date."));

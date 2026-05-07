@@ -98,6 +98,61 @@ const PATTERNS: Pattern[] = [
       suggest: "ntn login",
     }),
   },
+  {
+    match: (t) => /GitHub rate limit hit/i.test(t),
+    build: (t) => ({
+      summary: "GitHub rate limit hit while fetching the skill repo.",
+      detail:
+        "The hint about reset time is in the raw error below. Anonymous " +
+        "requests cap at 60/hour; authenticated calls get 5,000/hour.",
+      suggest: t.includes("GITHUB_TOKEN")
+        ? "export GITHUB_TOKEN=$(gh auth token)  # or set a personal token"
+        : undefined,
+    }),
+  },
+  {
+    match: (t) => /GitHub fetch timed out/i.test(t),
+    build: () => ({
+      summary: "GitHub took too long to respond.",
+      detail:
+        "Default timeout is 10s. If your network is slow or the file is unusually large, raise the limit:",
+      suggest: "NOTION_SKILLS_FETCH_TIMEOUT_MS=30000 notion-skills add ...",
+    }),
+  },
+  {
+    match: (t) => /GitHub API returned 404/i.test(t),
+    build: () => ({
+      summary: "GitHub couldn't find that repo, branch, or tag.",
+      detail:
+        "Check the spelling. If the repo is private, set GITHUB_TOKEN " +
+        "(or run `gh auth login`) so we can authenticate.",
+    }),
+  },
+  {
+    match: (t) => /Only github\.com URLs are supported/i.test(t),
+    build: () => ({
+      summary: "Only github.com is supported as a source host.",
+      detail:
+        "GitLab and self-hosted Git providers aren't wired up yet. If " +
+        "you have a use case for GitHub Enterprise, file an issue.",
+    }),
+  },
+  {
+    match: (t) => /Unknown source ".+"\. Configured/i.test(t),
+    build: () => ({
+      summary: "That source key isn't configured on this machine.",
+      suggest: "notion-skills source list",
+    }),
+  },
+  {
+    match: (t) => /Multiple sources configured and no default/i.test(t),
+    build: () => ({
+      summary: "Multiple sources configured; need to know which to use.",
+      detail:
+        "Pass `--source <key>` for this command, or set a default with " +
+        "`notion-skills source default <key>` so unscoped commands route there.",
+    }),
+  },
 ];
 
 export function translateError(err: unknown): FriendlyError {

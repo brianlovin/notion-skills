@@ -3,6 +3,7 @@ import { input, select } from "@inquirer/prompts";
 import type { NotionClient } from "../notion.js";
 import { parseNotionId } from "../parse-id.js";
 import { EAGERLY_CREATED_PROPERTIES } from "../schema.js";
+import { withSpinner } from "./_progress.js";
 
 export interface PickedDatabase {
   databaseId: string;
@@ -60,10 +61,9 @@ async function pickExistingDatabase(client: NotionClient): Promise<Omit<PickedDa
   });
   const databaseId = parseNotionId(raw)!;
 
-  console.log(chalk.dim(`Looking up database...`));
   let db;
   try {
-    db = await client.getDatabase(databaseId);
+    db = await withSpinner("Looking up database", () => client.getDatabase(databaseId));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
@@ -93,7 +93,7 @@ async function pickExistingDatabase(client: NotionClient): Promise<Omit<PickedDa
       choices: db.data_sources.map((ds) => ({ name: ds.name, value: ds.id })),
     });
   }
-  console.log(chalk.green(`✓ Connected to "${db.title}"`));
+  console.log(chalk.dim(`  Connected to "${db.title}"`));
   return {
     databaseId: db.id,
     dataSourceId,
@@ -107,9 +107,9 @@ async function createNewDatabase(client: NotionClient): Promise<Omit<PickedDatab
     message: "Name for the new database:",
     default: "Skills",
   });
-  console.log(chalk.dim(`Creating database in your workspace...`));
-  const db = await client.createSkillsDatabase({ title });
-  console.log(chalk.green(`✓ Created "${db.title}"`));
+  const db = await withSpinner("Creating database in your workspace", () =>
+    client.createSkillsDatabase({ title }),
+  );
   console.log(chalk.dim(`  ${db.url}`));
   return {
     databaseId: db.id,

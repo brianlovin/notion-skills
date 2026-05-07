@@ -22,6 +22,7 @@ import { auditSkill, loadAuditTarget, summariseIssues } from "../audit.js";
 import { pickSource } from "./_resolve.js";
 import { injectMetadataKey, parseFrontmatter } from "../frontmatter.js";
 import { classifyExtension } from "../skill-files.js";
+import { withSpinner } from "./_progress.js";
 
 interface AddOptions {
   /** Filter to one or more skills in a multi-skill repo (also: `owner/repo@skill`). */
@@ -101,12 +102,12 @@ export async function addCommand(refs: string[], opts: AddOptions = {}): Promise
     tree = resolved.cachedTree;
   }
 
-  console.log(
-    chalk.dim(
-      `Fetching ${formatSourceRef({ ...source, ref })}${chalk.dim(" …")}`,
-    ),
-  );
-  if (!tree) tree = await fetchRepoTree(source, ref);
+  if (!tree) {
+    tree = await withSpinner(
+      `Fetching ${formatSourceRef({ ...source, ref })}`,
+      () => fetchRepoTree(source, ref),
+    );
+  }
   if (tree.truncated) {
     console.log(
       chalk.yellow(
@@ -128,7 +129,10 @@ export async function addCommand(refs: string[], opts: AddOptions = {}): Promise
   // anthropics/skills/template/ has `name: template-skill` inside).
   // For repos with hundreds of skills this means many parallel fetches
   // up front, but `add` is interactive and the cost is bounded.
-  const hydratedAll = await hydrateCandidates(source, ref, candidates);
+  const hydratedAll = await withSpinner(
+    `Reading ${candidates.length} ${candidates.length === 1 ? "skill" : "skills"}`,
+    () => hydrateCandidates(source, ref, candidates),
+  );
 
   const skillNames = collectSkillFilter(opts, source);
   const hydrated = filterHydratedByName(hydratedAll, skillNames);

@@ -332,7 +332,19 @@ export class GitHubRateLimitError extends Error {
   }
 }
 
-const FETCH_TIMEOUT_MS = 10_000;
+/**
+ * Per-fetch timeout. 10s is comfortable for SKILL.md (~10KB) over a
+ * normal network. Override via NOTION_SKILLS_FETCH_TIMEOUT_MS for
+ * slow connections or unusually large skill files. Clamped to
+ * [1s, 5min] to prevent silly values from breaking things.
+ */
+const FETCH_TIMEOUT_MS = (() => {
+  const raw = process.env.NOTION_SKILLS_FETCH_TIMEOUT_MS;
+  if (!raw) return 10_000;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1_000) return 10_000;
+  return Math.min(n, 5 * 60 * 1_000);
+})();
 
 async function ghFetch(url: string): Promise<Response> {
   const headers: Record<string, string> = {

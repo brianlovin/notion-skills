@@ -26,6 +26,7 @@ import {
 import type { Source } from "./sources.js";
 import { defaultSource } from "./sources.js";
 import { computeLineDiff, hasChanges, renderUnifiedDiff } from "./diff.js";
+import { withSpinner } from "./commands/_progress.js";
 import {
   HASH_V,
   hashBehaviorProperties,
@@ -237,9 +238,13 @@ async function queryAndSummarise(
   colliding: Set<string>;
 }> {
   const sourceLabel = scope.sources.length === 1 ? "" : ` ${chalk.dim(`[${source.key}]`)}`;
-  if (!io.quiet) process.stdout.write(chalk.dim(`Querying ${source.name}${sourceLabel}... `));
-  const pages = await client.queryDataSource(source.data_source_id);
-  io.log(chalk.green(`✓`) + chalk.dim(` ${pages.length} pages`));
+  const pages = io.quiet
+    ? await client.queryDataSource(source.data_source_id)
+    : await withSpinner(
+        `Querying ${source.name}${sourceLabel}`,
+        () => client.queryDataSource(source.data_source_id),
+        { noteFor: (p) => `${p.length} ${p.length === 1 ? "page" : "pages"}` },
+      );
 
   const summaries = pages
     .filter((p) => !p.archived && !p.in_trash)

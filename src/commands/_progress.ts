@@ -55,3 +55,34 @@ export function startTask(label: string): Task {
     },
   };
 }
+
+/**
+ * Wrap an async operation in a spinner. Resolves to the operation's
+ * return value; on failure, marks the spinner failed and rethrows so
+ * the caller (or top-level error handler) can decide what to do.
+ *
+ * Optional `noteFor` callback derives a one-line note shown after
+ * the ✓ on success — useful for "✓ Querying Skills (17 pages)"
+ * style outputs without forcing callers to drop down to startTask.
+ *
+ * Use this instead of static `chalk.dim("Doing thing…")` lines for
+ * any user-visible wait > ~500ms — Notion API calls, GitHub fetches,
+ * schema reconciliation. The braille spinner makes it obvious the
+ * tool is alive vs hung.
+ */
+export async function withSpinner<T>(
+  label: string,
+  fn: () => Promise<T>,
+  options: { noteFor?: (value: T) => string } = {},
+): Promise<T> {
+  const task = startTask(label);
+  try {
+    const result = await fn();
+    task.done(options.noteFor ? options.noteFor(result) : undefined);
+    return result;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message.split("\n")[0] : String(err);
+    task.fail(reason);
+    throw err;
+  }
+}

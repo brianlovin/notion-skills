@@ -60,3 +60,50 @@ test("handles non-Error values", () => {
   assert.equal(f.summary, "plain string error");
   assert.equal(f.raw, "plain string error");
 });
+
+test("translates GitHub rate limit hit", () => {
+  const f = translateError(
+    new Error("GitHub rate limit hit (403). Set GITHUB_TOKEN…"),
+  );
+  assert.match(f.summary, /rate limit/i);
+  assert.match(f.suggest, /GITHUB_TOKEN/);
+});
+
+test("translates GitHub fetch timeout", () => {
+  const f = translateError(
+    new Error("GitHub fetch timed out after 10s (https://...)."),
+  );
+  assert.match(f.summary, /too long/i);
+  assert.match(f.suggest, /NOTION_SKILLS_FETCH_TIMEOUT_MS/);
+});
+
+test("translates GitHub 404 with private-repo hint", () => {
+  const f = translateError(
+    new Error("GitHub API returned 404 for owner/repo @ main."),
+  );
+  assert.match(f.summary, /find/i);
+  assert.match(f.detail, /private/i);
+});
+
+test("translates non-github host rejection", () => {
+  const f = translateError(
+    new Error("Only github.com URLs are supported (got gitlab.com)."),
+  );
+  assert.match(f.summary, /github\.com/i);
+});
+
+test("translates unknown source key", () => {
+  const f = translateError(
+    new Error('Unknown source "team". Configured sources: skills, runbooks.'),
+  );
+  assert.match(f.summary, /isn't configured/i);
+  assert.match(f.suggest, /source list/);
+});
+
+test("translates 'multiple sources, no default'", () => {
+  const f = translateError(
+    new Error("Multiple sources configured and no default set.\n  Pass --source <key>…"),
+  );
+  assert.match(f.summary, /which to use/i);
+  assert.match(f.detail, /--source/);
+});
