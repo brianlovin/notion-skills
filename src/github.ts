@@ -145,15 +145,54 @@ export interface RepoTree {
 /**
  * Resolve the repo's default branch when the user didn't specify one.
  * Returns null if the repo is unreachable / private without auth.
+ *
+ * Optimisation path: 99% of public repos default to `main` or
+ * (legacy) `master`. We try those branches' tree endpoints directly
+ * — a successful 200 means the branch exists AND we now have the
+ * tree we'd need next anyway, so we cache it. Only when both miss
+ * do we hit /repos/<owner>/<repo> for the canonical default_branch.
+ *
+ * The cached tree is opportunistic — caller checks `cachedTree` and
+ * skips the second fetchRepoTree call when present.
  */
 export async function resolveDefaultBranch(
   source: ParsedGitHubSource,
-): Promise<string | null> {
+): Promise<{ ref: string; cachedTree: RepoTree | null } | null> {
+  for (const candidate of ["main", "master"]) {
+    const tree = await tryFetchRepoTree(source, candidate);
+    if (tree) return { ref: candidate, cachedTree: tree };
+  }
+  // Neither convention hit — the repo likely uses a non-standard
+  // default branch (e.g. `develop`, `trunk`). Fall back to the
+  // metadata endpoint.
   const url = `https://api.github.com/repos/${source.owner}/${source.repo}`;
   const res = await ghFetch(url);
   if (!res.ok) return null;
   const body = (await res.json()) as { default_branch?: string };
-  return body.default_branch ?? null;
+  if (!body.default_branch) return null;
+  return { ref: body.default_branch, cachedTree: null };
+}
+
+async function tryFetchRepoTree(
+  source: ParsedGitHubSource,
+  ref: string,
+): Promise<RepoTree | null> {
+  const url = `https://api.github.com/repos/${source.owner}/${source.repo}/git/trees/${ref}?recursive=1`;
+  const res = await ghFetch(url);
+  if (!res.ok) return null;
+  const body = (await res.json()) as {
+    tree?: Array<{ path: string; type: string; sha: string; size?: number }>;
+    truncated?: boolean;
+  };
+  const entries: RepoTreeEntry[] = (body.tree ?? [])
+    .filter((e) => e.type === "blob" || e.type === "tree")
+    .map((e) => ({
+      path: e.path,
+      type: e.type as "blob" | "tree",
+      sha: e.sha,
+      ...(e.size !== undefined ? { size: e.size } : {}),
+    }));
+  return { ref, entries, truncated: !!body.truncated };
 }
 
 /**

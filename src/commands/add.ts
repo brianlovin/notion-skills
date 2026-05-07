@@ -55,14 +55,25 @@ export async function addCommand(refs: string[], opts: AddOptions = {}): Promise
 
   const source = parseGitHubSource(refs[0]!);
 
-  // Resolve the ref. If the user pinned, honour it; otherwise ask
-  // GitHub for the repo's default branch — we record an explicit ref
-  // in metadata.origin so future updates know what to re-fetch.
-  const ref = source.ref ?? (await resolveDefaultBranch(source));
-  if (!ref) {
-    throw new Error(
-      `Couldn't reach ${source.owner}/${source.repo}. Check the spelling, or set GITHUB_TOKEN if it's private.`,
-    );
+  // Resolve the ref. If the user pinned, honour it; otherwise probe
+  // for the repo's default branch (main/master/canonical fallback).
+  // resolveDefaultBranch may opportunistically return the tree it
+  // already had to fetch in the process — we reuse it to avoid a
+  // second roundtrip.
+  let ref: string;
+  let tree;
+  if (source.ref !== undefined) {
+    ref = source.ref;
+    tree = null;
+  } else {
+    const resolved = await resolveDefaultBranch(source);
+    if (!resolved) {
+      throw new Error(
+        `Couldn't reach ${source.owner}/${source.repo}. Check the spelling, or set GITHUB_TOKEN if it's private.`,
+      );
+    }
+    ref = resolved.ref;
+    tree = resolved.cachedTree;
   }
 
   console.log(
@@ -70,7 +81,7 @@ export async function addCommand(refs: string[], opts: AddOptions = {}): Promise
       `Fetching ${formatSourceRef({ ...source, ref })}${chalk.dim(" …")}`,
     ),
   );
-  const tree = await fetchRepoTree(source, ref);
+  if (!tree) tree = await fetchRepoTree(source, ref);
   if (tree.truncated) {
     console.log(
       chalk.yellow(
@@ -393,7 +404,22 @@ async function renderPreview(
 async function pickSkillsForAdd(skills: HydratedSkill[], opts: AddOptions): Promise<HydratedSkill[]> {
   if (skills.length === 1) return skills;
   if (opts.yes) return skills; // bulk-confirm = "all"
-  if (!process.stdin.isTTY) return skills;
+
+  // Non-TTY refuses to pick silently for multi-skill repos. Auto-
+  // adding 18 skills under a script's nose is the kind of surprise
+  // that kicks off Slack threads. Force the operator to be explicit:
+  // pick a single skill via @<name>/--skill, or pass --yes to claim
+  // "all of them".
+  if (!process.stdin.isTTY) {
+    const names = skills.map((s) => s.frontmatterName ?? s.skillName).join(", ");
+    throw new Error(
+      [
+        `${skills.length} skills found in this repo and stdin isn't a TTY.`,
+        `  → pass \`--skill <name>\` (or \`@<name>\` in the source) to add a specific one`,
+        `  → or pass \`--yes\` to add all of them: ${names}`,
+      ].join("\n"),
+    );
+  }
 
   const choices = skills.map((s) => ({
     name: `${s.frontmatterName ?? s.skillName}${s.description ? chalk.dim(` — ${truncate(oneLine(s.description), 70)}`) : ""}`,
@@ -504,10 +530,15 @@ async function materialiseSkill(
 }
 
 /**
- * Patch the SKILL.md frontmatter to record `metadata.origin = "<source ref>"`.
- * If the user-authored frontmatter already has a `metadata.origin`,
- * we leave it alone — they're presumably adapting an upstream skill
- * and want their own provenance to win.
+ * Patch the SKILL.md frontmatter to record `metadata.Origin = "<source ref>"`.
+ * If the user-authored frontmatter already has a `metadata.Origin` (or
+ * the lowercase `metadata.origin`), we leave it alone — the user is
+ * presumably adapting an upstream skill and wants their own
+ * provenance to win.
+ *
+ * Title-cased key so the round-trip surfaces a Notion column header
+ * named "Origin" alongside the spec's Title-Case columns (Name,
+ * Description, License…) rather than a stand-out lowercase "origin".
  *
  * Uses the yaml lib's `Document` API so we preserve quoting, key
  * ordering, and comments rather than regex-splicing strings.
@@ -516,22 +547,16 @@ function injectOriginMetadata(text: string, originRef: string): string {
   const stripped = text.replace(/^﻿/, "");
   const match = stripped.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
   if (!match) {
-    // No frontmatter at all — synthesise the bare minimum. This path
-    // is rare; agents that author skills without frontmatter are
-    // broken at the spec level.
-    return `---\nmetadata:\n  origin: ${JSON.stringify(originRef)}\n---\n\n${stripped}`;
+    return `---\nmetadata:\n  Origin: ${JSON.stringify(originRef)}\n---\n\n${stripped}`;
   }
   const [, fmText, body] = match;
   let doc;
   try {
     doc = parseDocument(fmText ?? "");
   } catch {
-    // Malformed YAML — fall back to leaving content untouched.
     return text;
   }
   if (!doc.contents || !isMap(doc.contents)) {
-    // Frontmatter parsed to a non-map (string, array, null). Out of
-    // shape; leave alone rather than coerce.
     return text;
   }
 
@@ -540,9 +565,11 @@ function injectOriginMetadata(text: string, originRef: string): string {
     metadata = new Document().createNode({}) as YAMLMap;
     doc.set("metadata", metadata);
   }
-  if (metadata.has("origin")) return text; // user-authored origin wins
+  // Respect any pre-existing origin key from the user — Title-case OR
+  // lowercase. Don't overwrite their provenance OR create a duplicate.
+  if (metadata.has("Origin") || metadata.has("origin")) return text;
 
-  metadata.set("origin", originRef);
+  metadata.set("Origin", originRef);
   return `---\n${doc.toString().trimEnd()}\n---\n${body ?? ""}`;
 }
 
