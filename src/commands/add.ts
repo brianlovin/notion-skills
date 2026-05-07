@@ -20,7 +20,7 @@ import {
 } from "../github.js";
 import { auditSkill, loadAuditTarget, summariseIssues } from "../audit.js";
 import { pickSource } from "./_resolve.js";
-import { parse as parseYaml } from "yaml";
+import { Document, parse as parseYaml, parseDocument, isMap, type YAMLMap } from "yaml";
 
 interface AddOptions {
   /** Filter to one or more skills in a multi-skill repo (also: `owner/repo@skill`). */
@@ -86,20 +86,23 @@ export async function addCommand(refs: string[], opts: AddOptions = {}): Promise
     );
   }
 
-  // Apply CLI/source filters.
-  const skillNames = collectSkillFilter(opts, source);
-  const filtered = filterByName(candidates, skillNames);
+  // Hydrate frontmatter on every candidate so we can filter, display,
+  // and slug from the canonical `name` field. Filtering against the
+  // dir name alone misses cases where dir != frontmatter name (e.g.
+  // anthropics/skills/template/ has `name: template-skill` inside).
+  // For repos with hundreds of skills this means many parallel fetches
+  // up front, but `add` is interactive and the cost is bounded.
+  const hydratedAll = await hydrateCandidates(source, ref, candidates);
 
-  if (filtered.length === 0) {
-    const known = candidates.map((c) => c.skillName).join(", ");
+  const skillNames = collectSkillFilter(opts, source);
+  const hydrated = filterHydratedByName(hydratedAll, skillNames);
+
+  if (hydrated.length === 0) {
+    const known = hydratedAll.map((c) => c.frontmatterName ?? c.skillName).sort().join(", ");
     throw new Error(
       `No matches for ${skillNames.join(", ")}. Available: ${known}`,
     );
   }
-
-  // Hydrate metadata (parse SKILL.md to get name + description) so
-  // preview/picker have something useful to show.
-  const hydrated = await hydrateCandidates(source, ref, filtered);
 
   if (opts.preview) {
     await renderPreview(hydrated, source, ref);
@@ -126,6 +129,7 @@ export async function addCommand(refs: string[], opts: AddOptions = {}): Promise
   const manifest = await readManifest(MANIFEST_FILE, defaultKey);
 
   const addedSlugs: string[] = [];
+  const failed: { name: string; reason: string }[] = [];
   // Track in-flight slugs so two adds in the same batch can't claim
   // the same name (would write into each other's dir otherwise).
   const inFlight = new Set<string>();
@@ -139,14 +143,41 @@ export async function addCommand(refs: string[], opts: AddOptions = {}): Promise
       picked.length === 1 ? opts.as : undefined,
     );
     inFlight.add(slug);
-    await materialiseSkill(source, ref, c, slug);
-    await fanoutSymlinks(slug, scope.targets);
-    addedSlugs.push(slug);
-    const note = namespaced
-      ? chalk.yellow(` (collided; added as '${slug}')`)
-      : chalk.dim(` (from ${formatSourceRef({ ...source, ref })})`);
-    console.log(`  ${chalk.green("+")} ${slug}${note}`);
+    // Per-skill try/catch: a network blip on one skill shouldn't tear
+    // down a bulk add. Mirrors the publish loop. Failures are listed
+    // at the end so the user can re-run on the failed subset.
+    try {
+      await materialiseSkill(source, ref, c, slug);
+      await fanoutSymlinks(slug, scope.targets);
+      addedSlugs.push(slug);
+      const note = namespaced
+        ? chalk.yellow(" (collided with existing)")
+        : chalk.dim(` (from ${formatSourceRef({ ...source, ref })})`);
+      console.log(`  ${chalk.green("+")} ${slug}${note}`);
+    } catch (err) {
+      // On failure, drop any partial dir we may have created so the
+      // user doesn't end up with empty central-store entries.
+      const partial = join(SKILLS_STORE, slug);
+      try {
+        const { rm } = await import("node:fs/promises");
+        await rm(partial, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
+      }
+      failed.push({ name: slug, reason: (err as Error).message.split("\n")[0] ?? "unknown error" });
+      console.log(`  ${chalk.red("✗")} ${slug} ${chalk.dim(`(${(err as Error).message.split("\n")[0]})`)}`);
+    }
   }
+
+  if (failed.length > 0) {
+    console.log("");
+    console.log(
+      chalk.yellow(
+        `${failed.length} of ${picked.length} ${picked.length === 1 ? "skill" : "skills"} failed. Re-run with the same source to retry.`,
+      ),
+    );
+  }
+  if (addedSlugs.length === 0) return;
 
   // Audit each added draft and surface counts inline. Errors don't
   // block — the draft is on disk and re-runnable; we just inform.
@@ -261,14 +292,15 @@ function collectSkillFilter(opts: AddOptions, source: ParsedGitHubSource): strin
   return [...new Set([...fromFlag, ...fromSource])];
 }
 
-function filterByName(candidates: SkillCandidate[], wanted: string[]): SkillCandidate[] {
-  if (wanted.length === 0) return candidates;
+function filterHydratedByName(hydrated: HydratedSkill[], wanted: string[]): HydratedSkill[] {
+  if (wanted.length === 0) return hydrated;
   const wantedLower = wanted.map((s) => s.toLowerCase());
-  return candidates.filter((c) =>
-    wantedLower.some(
-      (w) => w === "*" || w === c.skillName.toLowerCase() || w === c.skillDir.toLowerCase(),
-    ),
-  );
+  return hydrated.filter((c) => {
+    const fm = c.frontmatterName?.toLowerCase();
+    const dir = c.skillName.toLowerCase();
+    const subdir = c.skillDir.toLowerCase();
+    return wantedLower.some((w) => w === "*" || w === fm || w === dir || w === subdir);
+  });
 }
 
 interface HydratedSkill extends SkillCandidate {
@@ -283,19 +315,23 @@ async function hydrateCandidates(
   ref: string,
   candidates: SkillCandidate[],
 ): Promise<HydratedSkill[]> {
-  const out: HydratedSkill[] = [];
-  for (const c of candidates) {
-    const raw = await fetchFileContent(source, ref, c.skillMdPath);
-    if (raw === null) continue;
-    const fm = readFrontmatter(raw);
-    out.push({
-      ...c,
-      frontmatterName: typeof fm["name"] === "string" ? fm["name"] : null,
-      description: typeof fm["description"] === "string" ? fm["description"] : null,
-      rawSkillMd: raw,
-    });
-  }
-  return out;
+  // Parallelise the SKILL.md fetches — each is an independent HTTP
+  // call to raw.githubusercontent and the network is the bottleneck.
+  // For an 18-skill repo this drops the wall time from ~15s to ~1s.
+  const results = await Promise.all(
+    candidates.map(async (c) => {
+      const raw = await fetchFileContent(source, ref, c.skillMdPath);
+      if (raw === null) return null;
+      const fm = readFrontmatter(raw);
+      return {
+        ...c,
+        frontmatterName: typeof fm["name"] === "string" ? fm["name"] : null,
+        description: typeof fm["description"] === "string" ? fm["description"] : null,
+        rawSkillMd: raw,
+      } satisfies HydratedSkill;
+    }),
+  );
+  return results.filter((r): r is HydratedSkill => r !== null);
 }
 
 function readFrontmatter(text: string): Record<string, unknown> {
@@ -446,7 +482,8 @@ async function materialiseSkill(
 
   // Write every sibling file at its repo-relative path. We strip the
   // `<skillDir>/` prefix so relative paths land correctly under the
-  // local skill dir.
+  // local skill dir. Failed fetches are logged so the user knows the
+  // skill is missing pieces rather than silently incomplete.
   for (const sibling of skill.siblingFiles) {
     const rel =
       skill.skillDir === ""
@@ -456,7 +493,12 @@ async function materialiseSkill(
     const dest = join(dir, rel);
     await mkdir(dirname(dest), { recursive: true });
     const content = await fetchFileContent(source, ref, sibling.path);
-    if (content === null) continue;
+    if (content === null) {
+      console.log(
+        chalk.yellow(`    ⚠ ${rel}: not fetched (404). Skill may be incomplete.`),
+      );
+      continue;
+    }
     await writeFile(dest, content, "utf8");
   }
 }
@@ -466,6 +508,9 @@ async function materialiseSkill(
  * If the user-authored frontmatter already has a `metadata.origin`,
  * we leave it alone — they're presumably adapting an upstream skill
  * and want their own provenance to win.
+ *
+ * Uses the yaml lib's `Document` API so we preserve quoting, key
+ * ordering, and comments rather than regex-splicing strings.
  */
 function injectOriginMetadata(text: string, originRef: string): string {
   const stripped = text.replace(/^﻿/, "");
@@ -473,26 +518,32 @@ function injectOriginMetadata(text: string, originRef: string): string {
   if (!match) {
     // No frontmatter at all — synthesise the bare minimum. This path
     // is rare; agents that author skills without frontmatter are
-    // already broken at the spec level.
+    // broken at the spec level.
     return `---\nmetadata:\n  origin: ${JSON.stringify(originRef)}\n---\n\n${stripped}`;
   }
   const [, fmText, body] = match;
-  if (/(^|\n)metadata:[\s\S]*?\n\s+origin:/.test(fmText ?? "")) {
+  let doc;
+  try {
+    doc = parseDocument(fmText ?? "");
+  } catch {
+    // Malformed YAML — fall back to leaving content untouched.
     return text;
   }
-  // Two cases:
-  //   - metadata block exists but no origin: append `  origin: ...` under it.
-  //   - no metadata block: append a new `metadata:` block.
-  let nextFm: string;
-  if (/(^|\n)metadata:\s*\n/.test(fmText ?? "")) {
-    nextFm = (fmText ?? "").replace(
-      /(^|\n)(metadata:\s*\n)/,
-      `$1$2  origin: ${JSON.stringify(originRef)}\n`,
-    );
-  } else {
-    nextFm = `${(fmText ?? "").replace(/\s+$/, "")}\nmetadata:\n  origin: ${JSON.stringify(originRef)}`;
+  if (!doc.contents || !isMap(doc.contents)) {
+    // Frontmatter parsed to a non-map (string, array, null). Out of
+    // shape; leave alone rather than coerce.
+    return text;
   }
-  return `---\n${nextFm}\n---\n${body ?? ""}`;
+
+  let metadata = doc.get("metadata") as YAMLMap | undefined;
+  if (!metadata || !isMap(metadata)) {
+    metadata = new Document().createNode({}) as YAMLMap;
+    doc.set("metadata", metadata);
+  }
+  if (metadata.has("origin")) return text; // user-authored origin wins
+
+  metadata.set("origin", originRef);
+  return `---\n${doc.toString().trimEnd()}\n---\n${body ?? ""}`;
 }
 
 async function fanoutSymlinks(localSlug: string, targetKeys: string[]): Promise<void> {
@@ -511,20 +562,24 @@ async function runAuditSummary(localSlugs: string[]): Promise<void> {
     const target = await loadAuditTarget(slug, join(SKILLS_STORE, slug));
     if (!target) continue;
     const issues = auditSkill(target);
-    if (issues.length === 0) continue;
+    const s = summariseIssues(issues);
+    // Suppress info-only audits: most public skills lack the
+    // "Use when…" trigger phrasing (it's a notion-skills convention,
+    // not a spec requirement), so info-only would fire on every
+    // import. Warnings + errors actually need the user's attention.
+    if (s.errors === 0 && s.warnings === 0) continue;
     if (!any) {
       console.log("");
       any = true;
     }
-    const s = summariseIssues(issues);
-    const tag =
-      s.errors > 0
-        ? chalk.red(`✗ ${slug}`)
-        : s.warnings > 0
-          ? chalk.yellow(`⚠ ${slug}`)
-          : chalk.cyan(`ℹ ${slug}`);
-    const detail = `${issues.length} audit ${issues.length === 1 ? "issue" : "issues"} — run \`notion-skills audit ${slug}\``;
-    console.log(`  ${tag} ${chalk.dim(`(${detail})`)}`);
+    const tag = s.errors > 0 ? chalk.red(`✗ ${slug}`) : chalk.yellow(`⚠ ${slug}`);
+    const counts = [
+      s.errors > 0 ? `${s.errors} ${s.errors === 1 ? "error" : "errors"}` : "",
+      s.warnings > 0 ? `${s.warnings} ${s.warnings === 1 ? "warning" : "warnings"}` : "",
+    ]
+      .filter(Boolean)
+      .join(", ");
+    console.log(`  ${tag} ${chalk.dim(`(${counts} — run \`notion-skills audit ${slug}\`)`)}`);
   }
 }
 
