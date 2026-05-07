@@ -32,7 +32,10 @@ export interface ParsedGitHubSource {
 }
 
 const HEAD_FRAGMENT_RE = /^([^#@]+)(?:#([^@]*))?(?:@(.+))?$/;
-const TREE_URL_RE = /^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?(?:\/tree\/([^/]+)(?:\/(.+))?)?\/?$/;
+// `tree/<ref>/<path>` (folder view) and `blob/<ref>/<path>` (file
+// view) are both interesting — users paste either depending on
+// where they were in the GitHub UI when they grabbed the link.
+const TREE_URL_RE = /^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?(?:\/(?:tree|blob)\/([^/]+)(?:\/(.+))?)?\/?$/;
 const SHORT_RE = /^([^/]+)\/([^/#@]+)(?:\/(.+?))?$/;
 const SSH_RE = /^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/;
 
@@ -91,18 +94,25 @@ function cleanSource(source: ParsedGitHubSource): ParsedGitHubSource {
   // slashes from the subpath. Reject `..` segments to prevent the
   // skills.sh-style path-traversal escape.
   const repo = source.repo.replace(/\.git$/, "");
-  const subpath = source.subpath
+  const segments = source.subpath
     ?.replace(/^\/+|\/+$/g, "")
     .split("/")
     .filter((s) => s.length > 0);
-  if (subpath?.some((s) => s === "..")) {
+  if (segments?.some((s) => s === "..")) {
     throw new Error(`Unsafe subpath "${source.subpath}" — segments cannot include "..".`);
   }
+  // If the user pasted a `/blob/<ref>/.../SKILL.md` URL, the subpath
+  // points at the file. Strip it so we end up scoped to the skill's
+  // dir — that's the meaningful scope at the discovery layer.
+  const trimmed =
+    segments && segments[segments.length - 1] === "SKILL.md"
+      ? segments.slice(0, -1)
+      : segments;
   return {
     owner: source.owner,
     repo,
     ...(source.ref !== undefined ? { ref: decodeURIComponent(source.ref) } : {}),
-    ...(subpath && subpath.length > 0 ? { subpath: subpath.join("/") } : {}),
+    ...(trimmed && trimmed.length > 0 ? { subpath: trimmed.join("/") } : {}),
     ...(source.skillFilter !== undefined ? { skillFilter: source.skillFilter } : {}),
   };
 }

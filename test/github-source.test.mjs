@@ -83,6 +83,37 @@ test("https URL: tree/ref only (no subpath)", () => {
   );
 });
 
+test("https URL: blob/<ref>/<path>/SKILL.md → strips SKILL.md, keeps dir as subpath", () => {
+  // The most common user-share link: paste from the GitHub file view
+  // when they're looking at the SKILL.md itself.
+  assert.deepEqual(
+    parseGitHubSource(
+      "https://github.com/mattpocock/skills/blob/main/skills/engineering/diagnose/SKILL.md",
+    ),
+    {
+      owner: "mattpocock",
+      repo: "skills",
+      ref: "main",
+      subpath: "skills/engineering/diagnose",
+    },
+  );
+});
+
+test("https URL: blob/<ref>/<path> to a non-SKILL.md keeps the path as-is", () => {
+  // Edge case — pasting a sibling file URL. We don't strip; user
+  // probably meant to scope to the file's parent dir but our
+  // discoverer scopes to the dir anyway via subpath matching.
+  assert.deepEqual(
+    parseGitHubSource("https://github.com/owner/repo/blob/main/skills/foo/scripts/x.ts"),
+    {
+      owner: "owner",
+      repo: "repo",
+      ref: "main",
+      subpath: "skills/foo/scripts/x.ts",
+    },
+  );
+});
+
 test("ssh URL: git@github.com form", () => {
   assert.deepEqual(parseGitHubSource("git@github.com:vercel-labs/agent-skills.git"), {
     owner: "vercel-labs",
