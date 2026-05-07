@@ -29,6 +29,7 @@ import {
 import { applyRenames, detectRenames } from "../renames.js";
 import { type Source, defaultSource } from "../sources.js";
 import { pickSource } from "./_resolve.js";
+import { readFrontmatterList, readFrontmatterString } from "../frontmatter.js";
 
 interface ListOptions {
   installed?: boolean;
@@ -328,9 +329,8 @@ async function loadDraftRow(
   let tags: string[] = [];
   try {
     const md = await readFile(file, "utf8");
-    const fm = extractFrontmatterText(md);
-    description = readFmString(fm, "description");
-    tags = readFmList(fm, "tags");
+    description = readFrontmatterString(md, "description");
+    tags = readFrontmatterList(md, "tags");
   } catch {
     // ignore — a draft without a SKILL.md is still a valid row
   }
@@ -607,41 +607,3 @@ function truncate(s: string, max: number): string {
   return s.slice(0, max - 3).trimEnd() + "...";
 }
 
-function extractFrontmatterText(md: string): string {
-  const match = md.replace(/^﻿/, "").match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  return match ? match[1] ?? "" : "";
-}
-
-function readFmString(fm: string, key: string): string {
-  const re = new RegExp(`^${key}\\s*:\\s*(.+)$`, "m");
-  const m = fm.match(re);
-  if (!m || !m[1]) return "";
-  return m[1].trim().replace(/^["']|["']$/g, "");
-}
-
-function readFmList(fm: string, key: string): string[] {
-  const blockRe = new RegExp(
-    `^${key}\\s*:\\s*\\r?\\n((?:[ \\t]+-\\s+.+\\r?\\n?)+)`,
-    "m",
-  );
-  const block = fm.match(blockRe);
-  if (block && block[1]) {
-    return block[1]
-      .split("\n")
-      .map((line) => line.replace(/^[ \t]+-\s+/, "").trim())
-      .filter(Boolean);
-  }
-  const inline = new RegExp(`^${key}\\s*:\\s*(.+)$`, "m");
-  const m = fm.match(inline);
-  if (!m || m[1] === undefined) return [];
-  const value = m[1].trim();
-  if (value.startsWith("[")) {
-    try {
-      return JSON.parse(value);
-    } catch {
-      return [];
-    }
-  }
-  if (value.startsWith("-")) return [];
-  return value.split(/\s*,\s*/).filter(Boolean);
-}

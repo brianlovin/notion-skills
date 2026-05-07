@@ -1,18 +1,13 @@
 import chalk from "chalk";
-import { existsSync, lstatSync } from "node:fs";
-import { cp, mkdir, rm, writeFile } from "node:fs/promises";
+import { lstatSync } from "node:fs";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { checkbox, confirm } from "@inquirer/prompts";
 import { getScope } from "../scope.js";
-import { MANIFEST_FILE, ROOT_DIR, SKILLS_STORE } from "../paths.js";
+import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
 import { readManifest } from "../manifest.js";
 import { defaultSource } from "../sources.js";
-import {
-  ensureSymlink,
-  removeSymlink,
-  targetSkillPath,
-  targetsForKeys,
-} from "../targets.js";
+import { ensureSymlink, targetSkillPath, targetsForKeys } from "../targets.js";
 import { migrateCommand } from "./migrate.js";
 import {
   type ParsedGitHubSource,
@@ -25,7 +20,7 @@ import {
 } from "../github.js";
 import { auditSkill, loadAuditTarget, summariseIssues } from "../audit.js";
 import { pickSource } from "./_resolve.js";
-import { Document, parse as parseYaml, parseDocument, isMap, type YAMLMap } from "yaml";
+import { injectMetadataKey, parseFrontmatter } from "../frontmatter.js";
 
 interface AddOptions {
   /** Filter to one or more skills in a multi-skill repo (also: `owner/repo@skill`). */
@@ -40,8 +35,6 @@ interface AddOptions {
   source?: string;
   /** Skip prompts. */
   yes?: boolean;
-  /** Replace existing skills on collision (backs up first). Destructive — opt-in only. */
-  overwrite?: boolean;
   /** Drop colliding skills silently; install only the new ones. */
   skipExisting?: boolean;
 }
@@ -50,8 +43,14 @@ interface AddOptions {
  * Per-candidate decision made before any disk writes happen. Lets us
  * render the full plan to the user (and get a single confirm) instead
  * of surprising them with collisions skill-by-skill.
+ *
+ * Replacing a skill in-place is intentionally NOT a path here — the
+ * explicit two-step (`uninstall <slug>` then `add <source>`) keeps
+ * destructive operations aligned with the verb the user already has
+ * for "remove from machine". It also avoids duplicating uninstall's
+ * backup-on-drift logic.
  */
-type AddAction = "install-new" | "rename" | "overwrite" | "skip";
+type AddAction = "install-new" | "rename" | "skip";
 
 interface AddPlanItem {
   hydrated: HydratedSkill;
@@ -158,10 +157,6 @@ export async function addCommand(refs: string[], opts: AddOptions = {}): Promise
     throw new Error("--as only applies when adding exactly one skill.");
   }
 
-  if (opts.overwrite && opts.skipExisting) {
-    throw new Error("Pass either --overwrite or --skip-existing, not both.");
-  }
-
   const defaultKey =
     defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
   const manifest = await readManifest(MANIFEST_FILE, defaultKey);
@@ -193,15 +188,11 @@ export async function addCommand(refs: string[], opts: AddOptions = {}): Promise
   for (const item of plan) {
     if (item.action === "skip") continue;
     try {
-      if (item.action === "overwrite") {
-        await backupExistingSkill(item.proposedSlug, scope.targets);
-      }
       await materialiseSkill(source, ref, item.hydrated, item.proposedSlug);
       await fanoutSymlinks(item.proposedSlug, scope.targets);
       addedSlugs.push(item.proposedSlug);
-      const verb = item.action === "overwrite" ? chalk.cyan("↻") : chalk.green("+");
-      const note = renderActionNote(item, sourceRef);
-      console.log(`  ${verb} ${item.proposedSlug}${note}`);
+      const note = renderActionNote(item);
+      console.log(`  ${chalk.green("+")} ${item.proposedSlug}${note}`);
     } catch (err) {
       const partial = join(SKILLS_STORE, item.proposedSlug);
       try {
@@ -228,9 +219,29 @@ export async function addCommand(refs: string[], opts: AddOptions = {}): Promise
 
   // Audit each added draft and surface counts inline. Errors don't
   // block — the draft is on disk and re-runnable; we just inform.
-  await runAuditSummary(addedSlugs);
+  const auditCounts = await runAuditSummary(addedSlugs);
 
   if (opts.publish) {
+    // Publish gate: errors block. Draft stays on disk so the user
+    // can fix in place (`open <slug> --local`) and `publish <slug>`
+    // when ready. This matches the principle that destructive /
+    // irrecoverable operations (pushing to a shared Notion store)
+    // should require a clean skill.
+    if (auditCounts.errors > 0) {
+      const slugs = auditCounts.slugsWithErrors.join(", ");
+      console.log("");
+      console.log(
+        chalk.red(
+          `✗ Refusing to publish: ${auditCounts.errors} audit ${auditCounts.errors === 1 ? "error" : "errors"} in ${slugs}.`,
+        ),
+      );
+      console.log(
+        chalk.dim(
+          `  Fix with \`notion-skills audit ${auditCounts.slugsWithErrors[0]}\` (or open + edit), then \`notion-skills publish <slug>\`.`,
+        ),
+      );
+      return;
+    }
     const target = await pickSource(opts.source, scope);
     console.log("");
     console.log(
@@ -382,17 +393,7 @@ async function hydrateCandidates(
 }
 
 function readFrontmatter(text: string): Record<string, unknown> {
-  const stripped = text.replace(/^﻿/, "");
-  const match = stripped.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!match) return {};
-  try {
-    const parsed = parseYaml(match[1] ?? "");
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {};
-  } catch {
-    return {};
-  }
+  return parseFrontmatter(text).frontmatter;
 }
 
 // ---------- preview ----------
@@ -502,13 +503,14 @@ async function pickSkillsForAdd(
 /**
  * Classify every picked candidate into an explicit action — never
  * silently destructive. The default for a colliding skill is "rename"
- * (auto-namespace, both versions kept). Users opt into destructive
- * paths via flags:
- *   --overwrite      → backup existing then replace
+ * (auto-namespace, both versions kept). Users opt out via:
  *   --skip-existing  → drop the colliding ones, install only news
+ *   uninstall + add  → the explicit two-step for "replace existing"
  *
- * The single-skill `--as` override applies before collision logic:
- * if a user provided a name and it doesn't collide, just use it.
+ * `--as` is a single-skill override: if it doesn't collide, use it.
+ * If it DOES collide, we error rather than fall back — the user
+ * explicitly named the skill, and silently producing a different
+ * name (`<owner>-<source-slug>`) would be surprising.
  */
 function buildAddPlan(
   picked: HydratedSkill[],
@@ -535,36 +537,31 @@ function buildAddPlan(
     const baseSlug = norm(c.frontmatterName ?? c.skillName);
     const override = picked.length === 1 ? opts.as : undefined;
 
-    // --as wins outright when it doesn't collide. If --as DOES
-    // collide, we fall through to the same flag/policy as a normal
-    // collision below.
-    if (override && !taken(override)) {
+    if (override) {
+      // `--as` is the user's explicit name. We honour it OR refuse —
+      // never silently pick a different one.
+      if (taken(override)) {
+        throw new Error(
+          `--as "${override}" is already taken on this machine. Pick a different name, or run \`notion-skills uninstall ${override}\` first.`,
+        );
+      }
       inFlight.add(override);
       plan.push({ hydrated: c, action: "install-new", proposedSlug: override });
       continue;
     }
 
-    const desiredSlug = override ?? baseSlug;
+    const desiredSlug = baseSlug;
     if (!taken(desiredSlug)) {
       inFlight.add(desiredSlug);
       plan.push({ hydrated: c, action: "install-new", proposedSlug: desiredSlug });
       continue;
     }
 
-    // Collision. Pick the action from flags; default = rename.
+    // Collision. --skip-existing drops it; otherwise default to rename.
     if (opts.skipExisting) {
       plan.push({ hydrated: c, action: "skip", proposedSlug: desiredSlug, conflictWith: desiredSlug });
       continue;
     }
-    if (opts.overwrite) {
-      inFlight.add(desiredSlug);
-      plan.push({ hydrated: c, action: "overwrite", proposedSlug: desiredSlug, conflictWith: desiredSlug });
-      continue;
-    }
-
-    // Default: rename via <owner>-<slug>, falling back to numeric
-    // suffix if THAT also collides (rare but possible after
-    // multi-org workflow).
     const namespaced = norm(`${source.owner}-${baseSlug}`);
     const renamed = !taken(namespaced) ? namespaced : appendUntilFree(namespaced, taken);
     inFlight.add(renamed);
@@ -586,18 +583,20 @@ function appendUntilFree(base: string, taken: (slug: string) => boolean): string
  * before we touch any files. Quiet when there are no collisions —
  * a flat add of new skills doesn't need ceremony.
  */
+/**
+ * Render the pre-flight plan, but only when there's something
+ * non-trivial to surface. A flat add of new skills doesn't need a
+ * summary header — the per-skill `+ slug` lines after confirm are
+ * the result, and a "+ N new" summary on top is just noise.
+ */
 function renderAddPlan(plan: AddPlanItem[], sourceRef: string): void {
-  const news = plan.filter((p) => p.action === "install-new");
   const renames = plan.filter((p) => p.action === "rename");
-  const overwrites = plan.filter((p) => p.action === "overwrite");
   const skips = plan.filter((p) => p.action === "skip");
-  const hasCollisions = renames.length + overwrites.length + skips.length > 0;
+  const hasCollisions = renames.length > 0 || skips.length > 0;
+  if (!hasCollisions) return;
 
   console.log("");
   console.log(chalk.bold(`Adding from ${sourceRef}:`));
-  if (news.length > 0) {
-    console.log(`  ${chalk.green("+")} ${news.length} new`);
-  }
   if (renames.length > 0) {
     console.log(
       chalk.yellow(
@@ -611,14 +610,6 @@ function renderAddPlan(plan: AddPlanItem[], sourceRef: string): void {
       );
     }
   }
-  if (overwrites.length > 0) {
-    console.log(
-      chalk.red(
-        `  ↻ ${overwrites.length} ${overwrites.length === 1 ? "will replace existing" : "will replace existing"} (backed up first):`,
-      ),
-    );
-    for (const o of overwrites) console.log(`      ${o.proposedSlug}`);
-  }
   if (skips.length > 0) {
     console.log(
       chalk.dim(
@@ -626,23 +617,20 @@ function renderAddPlan(plan: AddPlanItem[], sourceRef: string): void {
       ),
     );
   }
-  // Hint shown only on the default rename path. If the user already
-  // chose --overwrite or --skip-existing they made a decision; don't
-  // nag.
-  if (renames.length > 0 && overwrites.length === 0 && skips.length === 0) {
+  // Hint only on the default rename path. If --skip-existing was
+  // given, no hint needed (they already made a choice).
+  if (renames.length > 0 && skips.length === 0) {
     console.log(
       chalk.dim(
-        "  (use --overwrite to replace existing, --skip-existing to drop collisions)",
+        "  (use --skip-existing to drop collisions, or `uninstall <slug>` then add to refresh in place)",
       ),
     );
   }
-  void hasCollisions;
 }
 
 async function confirmAddPlan(plan: AddPlanItem[], opts: AddOptions): Promise<boolean> {
-  const overwrites = plan.some((p) => p.action === "overwrite");
   const renames = plan.some((p) => p.action === "rename");
-  const needsConfirm = overwrites || renames;
+  const needsConfirm = renames;
 
   if (opts.yes) return true;
 
@@ -650,77 +638,26 @@ async function confirmAddPlan(plan: AddPlanItem[], opts: AddOptions): Promise<bo
   if (!needsConfirm) return true;
 
   if (!process.stdin.isTTY) {
-    // Non-TTY without --yes when collisions exist: refuse rather than
-    // proceed with a destructive (overwrite) or surprising (rename)
-    // action no one signed off on.
+    // Non-TTY without --yes when collisions exist: refuse rather
+    // than proceed with a surprising rename no one signed off on.
     throw new Error(
       [
         "Collisions detected and stdin isn't a TTY. Choose explicitly:",
-        "  --yes              accept the plan above",
-        "  --overwrite        replace existing skills (with backup)",
+        "  --yes              accept the rename plan above",
         "  --skip-existing    drop collisions, install only the new ones",
+        "  uninstall + add    explicit two-step to refresh in place",
       ].join("\n"),
     );
   }
 
-  return await confirm({
-    message: overwrites
-      ? "Continue? Existing skills will be backed up then replaced."
-      : "Continue?",
-    default: !overwrites,
-  });
+  return await confirm({ message: "Continue?", default: true });
 }
 
-function renderActionNote(item: AddPlanItem, sourceRef: string): string {
+function renderActionNote(item: AddPlanItem): string {
   if (item.action === "rename") {
     return chalk.yellow(` (was ${item.conflictWith} — kept alongside existing)`);
   }
-  if (item.action === "overwrite") {
-    return chalk.dim(` (replaced existing; backed up to ~/.notion-skills/backup/)`);
-  }
-  return chalk.dim(` (from ${sourceRef})`);
-}
-
-/**
- * Move an existing skill dir + its symlinks aside before an
- * --overwrite replaces them. Mirrors the backup pattern used by
- * uninstall so the user can recover from a mistaken --overwrite.
- */
-async function backupExistingSkill(
-  localSlug: string,
-  targetKeys: string[],
-): Promise<void> {
-  const skillDir = join(SKILLS_STORE, localSlug);
-  if (!existsSync(skillDir)) return;
-  const backupRoot = join(
-    ROOT_DIR,
-    "backup",
-    `add-overwrite-${addBackupTimestamp()}`,
-  );
-  await mkdir(backupRoot, { recursive: true });
-  await cp(skillDir, join(backupRoot, localSlug), { recursive: true });
-
-  // Remove existing dir + agent symlinks so the new write lands
-  // cleanly. fanoutSymlinks below recreates them.
-  await rm(skillDir, { recursive: true, force: true });
-  const targets = targetsForKeys(targetKeys);
-  for (const t of targets) {
-    await removeSymlink(targetSkillPath(t, localSlug));
-  }
-}
-
-function addBackupTimestamp(): string {
-  const d = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return (
-    d.getUTCFullYear().toString() +
-    pad(d.getUTCMonth() + 1) +
-    pad(d.getUTCDate()) +
-    "_" +
-    pad(d.getUTCHours()) +
-    pad(d.getUTCMinutes()) +
-    pad(d.getUTCSeconds())
-  );
+  return "";
 }
 
 async function materialiseSkill(
@@ -765,47 +702,13 @@ async function materialiseSkill(
 }
 
 /**
- * Patch the SKILL.md frontmatter to record `metadata.Origin = "<source ref>"`.
- * If the user-authored frontmatter already has a `metadata.Origin` (or
- * the lowercase `metadata.origin`), we leave it alone — the user is
- * presumably adapting an upstream skill and wants their own
- * provenance to win.
- *
- * Title-cased key so the round-trip surfaces a Notion column header
- * named "Origin" alongside the spec's Title-Case columns (Name,
- * Description, License…) rather than a stand-out lowercase "origin".
- *
- * Uses the yaml lib's `Document` API so we preserve quoting, key
- * ordering, and comments rather than regex-splicing strings.
+ * Inject `metadata.Origin = "<source ref>"` so the SKILL.md carries
+ * provenance forward through publish (where it round-trips as a
+ * Notion column). Delegates to the shared frontmatter helper, which
+ * preserves the user's hand-authored `Origin`/`origin` if present.
  */
 function injectOriginMetadata(text: string, originRef: string): string {
-  const stripped = text.replace(/^﻿/, "");
-  const match = stripped.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
-  if (!match) {
-    return `---\nmetadata:\n  Origin: ${JSON.stringify(originRef)}\n---\n\n${stripped}`;
-  }
-  const [, fmText, body] = match;
-  let doc;
-  try {
-    doc = parseDocument(fmText ?? "");
-  } catch {
-    return text;
-  }
-  if (!doc.contents || !isMap(doc.contents)) {
-    return text;
-  }
-
-  let metadata = doc.get("metadata") as YAMLMap | undefined;
-  if (!metadata || !isMap(metadata)) {
-    metadata = new Document().createNode({}) as YAMLMap;
-    doc.set("metadata", metadata);
-  }
-  // Respect any pre-existing origin key from the user — Title-case OR
-  // lowercase. Don't overwrite their provenance OR create a duplicate.
-  if (metadata.has("Origin") || metadata.has("origin")) return text;
-
-  metadata.set("Origin", originRef);
-  return `---\n${doc.toString().trimEnd()}\n---\n${body ?? ""}`;
+  return injectMetadataKey(text, "Origin", originRef);
 }
 
 async function fanoutSymlinks(localSlug: string, targetKeys: string[]): Promise<void> {
@@ -818,17 +721,27 @@ async function fanoutSymlinks(localSlug: string, targetKeys: string[]): Promise<
 
 // ---------- audit summary ----------
 
-async function runAuditSummary(localSlugs: string[]): Promise<void> {
+interface AuditTotals {
+  errors: number;
+  warnings: number;
+  slugsWithErrors: string[];
+}
+
+async function runAuditSummary(localSlugs: string[]): Promise<AuditTotals> {
   let any = false;
+  const totals: AuditTotals = { errors: 0, warnings: 0, slugsWithErrors: [] };
   for (const slug of localSlugs) {
     const target = await loadAuditTarget(slug, join(SKILLS_STORE, slug));
     if (!target) continue;
     const issues = auditSkill(target);
     const s = summariseIssues(issues);
-    // Suppress info-only audits: most public skills lack the
-    // "Use when…" trigger phrasing (it's a notion-skills convention,
+    totals.errors += s.errors;
+    totals.warnings += s.warnings;
+    if (s.errors > 0) totals.slugsWithErrors.push(slug);
+    // Suppress info-only audits — most public skills lack the
+    // "Use when…" trigger phrasing (a notion-skills convention,
     // not a spec requirement), so info-only would fire on every
-    // import. Warnings + errors actually need the user's attention.
+    // import. Warnings + errors actually need attention.
     if (s.errors === 0 && s.warnings === 0) continue;
     if (!any) {
       console.log("");
@@ -843,6 +756,7 @@ async function runAuditSummary(localSlugs: string[]): Promise<void> {
       .join(", ");
     console.log(`  ${tag} ${chalk.dim(`(${counts} — run \`notion-skills audit ${slug}\`)`)}`);
   }
+  return totals;
 }
 
 // ---------- shared mini-helpers ----------

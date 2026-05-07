@@ -11,7 +11,7 @@
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { parseFrontmatter } from "./frontmatter.js";
 
 export type Severity = "error" | "warning" | "info";
 
@@ -316,22 +316,8 @@ function splitFrontmatter(text: string): {
   frontmatter: Record<string, unknown>;
   body: string;
 } {
-  const stripped = text.replace(/^﻿/, "");
-  const match = stripped.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
-  if (!match) {
-    return { frontmatter: {}, body: stripped };
-  }
-  let parsed: unknown;
-  try {
-    parsed = parseYaml(match[1] ?? "");
-  } catch {
-    return { frontmatter: {}, body: match[2] ?? "" };
-  }
-  const fm =
-    parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {};
-  return { frontmatter: fm, body: match[2] ?? "" };
+  const r = parseFrontmatter(text);
+  return { frontmatter: r.frontmatter, body: r.body };
 }
 
 async function listSiblingFiles(skillDir: string): Promise<{ path: string; size: number }[]> {
