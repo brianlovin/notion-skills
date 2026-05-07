@@ -62,6 +62,7 @@ program
 program
   .command("sync")
   .description("Pull updates for skills you have installed (pull-only — use `publish` to push)")
+  .option("--no-diff", "hide per-skill content diffs")
   .action(syncCommand);
 
 program

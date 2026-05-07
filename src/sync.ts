@@ -25,6 +25,7 @@ import {
 } from "./manifest.js";
 import type { Source } from "./sources.js";
 import { defaultSource } from "./sources.js";
+import { computeLineDiff, hasChanges, renderUnifiedDiff } from "./diff.js";
 import {
   HASH_V,
   hashBehaviorProperties,
@@ -80,6 +81,13 @@ export interface RunSyncOptions {
    * the canonical formatting.
    */
   extraFetchIds?: Set<string>;
+  /**
+   * When true, render a unified diff under each `↓ <slug>` line so the
+   * user sees what changed in this pull. Defaults to false to keep the
+   * sync output compact; the CLI flips it on for the standalone `sync`
+   * command and leaves it off for migrate's silent reconcile.
+   */
+  showDiff?: boolean;
 }
 
 /**
@@ -185,7 +193,18 @@ async function runSyncForSource(
   const toFetch = kept.filter((k) =>
     new Set([...diff.toFetch, ...missingPageIds, ...(options.extraFetchIds ?? [])]).has(k.id),
   );
-  await pullPages(client, source, queried.pages, toFetch, kept, manifest, contentRoot, summary, io.log);
+  await pullPages(
+    client,
+    source,
+    queried.pages,
+    toFetch,
+    kept,
+    manifest,
+    contentRoot,
+    summary,
+    io.log,
+    !!options.showDiff,
+  );
 
   await backfillLocalHash(manifest, source, contentRoot);
   dropStaleLocalHash(manifest, diff.toRemove, approvedRemovals);
@@ -407,6 +426,7 @@ async function pullPages(
   contentRoot: string,
   summary: SyncSummary,
   log: (s: string) => void,
+  showDiff: boolean,
 ): Promise<void> {
   if (toFetch.length === 0) return;
   log(chalk.dim(`Pulling ${toFetch.length} ${toFetch.length === 1 ? "page" : "pages"}:`));
@@ -421,7 +441,16 @@ async function pullPages(
       log(`  ${chalk.yellow("!")} ${summaryPage.title} ${chalk.dim(`(${converted.reason})`)}`);
       continue;
     }
-    await applySkillPullResult(converted.skill, source, manifest, kept, contentRoot, summary, log);
+    await applySkillPullResult(
+      converted.skill,
+      source,
+      manifest,
+      kept,
+      contentRoot,
+      summary,
+      log,
+      showDiff,
+    );
   }
 }
 
@@ -433,6 +462,7 @@ async function applySkillPullResult(
   contentRoot: string,
   summary: SyncSummary,
   log: (s: string) => void,
+  showDiff: boolean,
 ): Promise<void> {
   const md = buildSkillMarkdown({ properties: skill.properties, body: skill.body });
   const sourceSlug = skill.properties.name;
@@ -444,8 +474,29 @@ async function applySkillPullResult(
   );
   const localSlug = existing ? existing[0]! : sourceSlug;
   const skillDir = join(contentRoot, localSlug);
+  const skillFile = join(skillDir, "SKILL.md");
+
+  // Capture the previous content for diff rendering BEFORE we
+  // overwrite. Only diff when local_hash matches manifest's record —
+  // that means the on-disk file IS the last-synced content, so a diff
+  // against the new pull cleanly shows "what Notion changed". If the
+  // user has local edits (hash mismatch), skip the diff: their changes
+  // would conflate with Notion's, producing noise.
+  let previousContent: string | null = null;
+  const previousEntry = existing?.[1];
+  if (showDiff && previousEntry?.local_hash) {
+    try {
+      const onDisk = await readFile(skillFile, "utf8");
+      if (hashContent(onDisk) === previousEntry.local_hash) {
+        previousContent = onDisk;
+      }
+    } catch {
+      // No previous file or read failure: no diff for this skill.
+    }
+  }
+
   await mkdir(skillDir, { recursive: true });
-  await writeFile(join(skillDir, "SKILL.md"), md, "utf8");
+  await writeFile(skillFile, md, "utf8");
   await materializeFiles(skillDir, skill.files);
 
   const wasNew = !existing;
@@ -465,6 +516,25 @@ async function applySkillPullResult(
   };
 
   log(`  ${wasNew ? chalk.green("+") : chalk.cyan("↓")} ${localSlug}`);
+  if (previousContent !== null) {
+    logSkillDiff(previousContent, md, log);
+  }
+}
+
+function logSkillDiff(
+  previous: string,
+  next: string,
+  log: (s: string) => void,
+): void {
+  const hunks = computeLineDiff(previous, next);
+  if (!hasChanges(hunks)) return;
+  const rendered = renderUnifiedDiff(hunks, { context: 1, maxLines: 20 });
+  for (const line of rendered) {
+    if (line.type === "add") log(chalk.green(`      + ${line.text}`));
+    else if (line.type === "remove") log(chalk.red(`      - ${line.text}`));
+    else if (line.type === "elide") log(chalk.dim(`      ${line.text}`));
+    else log(chalk.dim(`        ${line.text}`));
+  }
 }
 
 // ---------- phase: backfill / drop local hashes ----------
