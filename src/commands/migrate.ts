@@ -48,99 +48,28 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
 
   const scope = await getScope();
   if (!scope) {
-    throw new Error(
-      "No scope configured. Run `notion-skills init` first.",
-    );
+    throw new Error("No scope configured. Run `notion-skills init` first.");
   }
   const source = await pickSource(opts.source, scope);
+  const client = new NotionClient();
 
-  // Resolve sources. The central store is always scanned: a SKILL.md
-  // sitting there with no manifest entry is a local-only skill that
-  // needs uploading (AI-authored via `gen`, or written by hand).
   const scopeTargetDirs = scope.targets
     .map((k) => findTargetByKey(k)?.dir)
     .filter((d): d is string => !!d);
 
-  const sourceDirs = resolveSourceDirs({
-    extras: [SKILLS_STORE, ...(opts.from ?? [])],
-    targetDirs: scopeTargetDirs,
-  });
-
-  // Manifest tells us which central-store entries are already synced
-  // from Notion (so they aren't candidates for re-upload).
-  const manifest = await readManifest(MANIFEST_FILE, source.key);
-  // Local skills are "tracked" if their dir name (local_slug) is the
-  // source_slug of an existing entry from the same source — i.e. would
-  // collide on re-upload. We only consider this source's entries since
-  // a skill in another source's column doesn't block a new upload here.
-  const trackedNames = new Set(
-    manifest
-      ? Object.values(manifest.skills)
-          .filter((e) => e.source_key === source.key)
-          .map((e) => e.source_slug)
-      : [],
-  );
-
-  // Caller-curated runs (init/sync) suppress the source/probe prelude —
-  // they already showed the user the picker, so an extra "Sources:" +
-  // "Checking Notion..." preamble is just noise.
+  // Caller-curated runs (init/sync) suppress the source/probe prelude.
   const verbose = !opts.only;
 
-  if (verbose) {
-    console.log(chalk.bold(`Sources:`));
-    for (const dir of sourceDirs) {
-      console.log(`  ${dir}${existsSync(dir) ? "" : chalk.dim(" (does not exist)")}`);
-    }
-    console.log("");
-  }
+  const classifications = await discoverAndClassify(
+    client,
+    source,
+    opts,
+    scopeTargetDirs,
+    verbose,
+  );
 
-  // Discovery + initial classification.
-  let classifications = await discoverSkills({ sourceDirs, trackedNames });
+  if (verbose) printClassifications(classifications, opts);
 
-  // Conflict detection: query Notion for existing slugs.
-  const client = new NotionClient();
-  if (verbose) {
-    process.stdout.write(chalk.dim("Checking Notion for existing skills... "));
-  }
-  const existing = await client.queryDataSource(source.data_source_id);
-  if (verbose) {
-    console.log(chalk.green("✓") + chalk.dim(` ${existing.length} pages`));
-  }
-
-  const existingByName = new Map<string, { pageId: string; title: string }>();
-  for (const page of existing) {
-    if (page.archived || page.in_trash) continue;
-    const titleProp = Object.values(page.properties).find(
-      (p) => p.type === "title",
-    );
-    const title = (titleProp?.title ?? [])
-      .map((r) => r.plain_text)
-      .join("")
-      .trim();
-    if (!title) continue;
-    const { slugify } = await import("../convert.js");
-    existingByName.set(slugify(title), { pageId: page.id, title });
-  }
-
-  classifications = markConflicts(classifications, existingByName);
-
-  if (opts.only) {
-    const onlySet = new Set(opts.only);
-    classifications = classifications.filter((c) => {
-      if (c.kind === "new" || c.kind === "conflict") {
-        return onlySet.has(c.skill.name);
-      }
-      return false;
-    });
-  }
-
-  // Print classification summary only for standalone runs. The picker
-  // already summarised the selection in init/sync.
-  if (verbose) {
-    printClassifications(classifications, opts);
-  }
-
-  // Determine candidates to act on.
   const willCreate = classifications.filter((c) => c.kind === "new");
   const conflicts = classifications.filter((c) => c.kind === "conflict");
   const willOverwrite = opts.overwrite ? conflicts : [];
@@ -149,175 +78,38 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
   if (total === 0) {
     console.log(chalk.dim("Nothing to migrate.\n"));
     if (conflicts.length > 0 && !opts.overwrite) {
-      console.log(
-        chalk.dim("Pass --overwrite to replace the existing Notion pages."),
-      );
+      console.log(chalk.dim("Pass --overwrite to replace the existing Notion pages."));
     }
     return;
   }
-
   if (opts.dryRun) {
     console.log(chalk.dim("\n--dry-run: not creating anything."));
     return;
   }
-
-  if (!opts.yes) {
-    const newWord = willCreate.length === 1 ? "page" : "pages";
-    const ok = await confirm({
-      message: `Create ${willCreate.length} new ${newWord}${
-        willOverwrite.length ? ` and overwrite ${willOverwrite.length}` : ""
-      } in "${source.name}"?`,
-      default: true,
-    });
-    if (!ok) {
-      console.log(chalk.dim("Aborted."));
-      return;
-    }
+  if (!(await confirmIntent(willCreate.length, willOverwrite.length, source.name, opts))) {
+    return;
   }
 
-  // Progressive schema: figure out which Notion columns the about-to-
-  // upload skills actually need, and add only those. Spec defaults
-  // (e.g. shell: bash) get filtered out by notionPropsForSkill so we
-  // don't surface columns where every cell would be the default.
-  const neededProps = new Set<string>();
-  for (const c of [...willCreate, ...willOverwrite]) {
-    if (c.kind !== "new" && c.kind !== "conflict") continue;
-    for (const name of notionPropsForSkill(
-      c.skill.properties as unknown as Record<string, unknown>,
-    )) {
-      neededProps.add(name);
-    }
-  }
-  if (neededProps.size > 0) {
-    await client.upgradeSchema(source.data_source_id, { only: neededProps });
-  }
+  await prepareSchemaAndOptions(client, source, [...willCreate, ...willOverwrite]);
 
-  // Self-heal select properties: any agent / model values referenced by
-  // the migration that aren't already options on the data source need to
-  // be added before the page-create call (Notion rejects unknown options).
-  // Must run AFTER upgradeSchema so the columns exist to attach options to.
-  const selfHealing = collectSelfHealingValues([...willCreate, ...willOverwrite]);
-  if (selfHealing.size > 0) {
-    await client.ensureSelectOptions(source.data_source_id, selfHealing);
-  }
-
-  // ---------- Phase 1: write to Notion ----------
-  //
-  // We do all Notion writes BEFORE touching local files. If a create fails
-  // partway, locals stay intact; the user can re-run migrate after fixing
-  // the underlying issue (the failed skill becomes a no-op since
-  // its slug now exists in Notion as a partial page — caught next run).
-  //
-  // `sources` collects every realpath that should be moved to backup
-  // when the Notion write succeeds: the canonical source + any
-  // identical-content duplicates + any conflicting copies. We back them
-  // ALL up so no stale non-symlink dirs are left in target dirs.
   console.log(chalk.bold(`\nUploading ${total} ${total === 1 ? "skill" : "skills"}:`));
 
-  const created: { name: string; pageId: string; sources: string[] }[] = [];
-  const updated: { name: string; pageId: string; sources: string[] }[] = [];
-  const failed: string[] = [];
-
-  const allSources = (s: Classification): string[] => {
-    if (s.kind !== "new" && s.kind !== "conflict") return [];
-    return [
-      s.skill.source,
-      ...(s.skill.additionalSources ?? []),
-      ...(s.skill.conflictingSources ?? []),
-    ];
-  };
-
-  // Snapshot the data source's columns once per migrate run for
-  // metadata round-trip (frontmatter `metadata.<key>` is matched
-  // against existing column names; non-matching keys are skipped).
+  // Phase 1: write to Notion. Locals are untouched on failure.
   const dataSource = await client.getDataSource(source.data_source_id);
   const existingColumns = new Set(Object.keys(dataSource.properties));
+  const { created, updated, failed } = await pushAllPages(
+    client,
+    source,
+    willCreate,
+    willOverwrite,
+    existingColumns,
+  );
 
-  for (const c of willCreate) {
-    if (c.kind !== "new") continue;
-    const task = startTask(c.skill.name);
-    try {
-      const pageId = await client.createSkillPage(
-        source.data_source_id,
-        // Running `publish` is an explicit "ship it" gesture, so new
-        // CLI-published pages start with Published=true. Notion-side
-        // drafts (created via Notion's UI) default to false instead.
-        { ...c.skill.properties, published: true },
-        existingColumns,
-      );
-      if (c.skill.body.trim()) {
-        await ntnSetPageMarkdown(pageId, c.skill.body);
-      }
-      await pushSkillFiles(client, pageId, c.skill.source);
-      created.push({ name: c.skill.name, pageId, sources: allSources(c) });
-      task.done();
-    } catch (err) {
-      failed.push(c.skill.name);
-      task.fail((err as Error).message.split("\n")[0]);
-    }
-  }
-
-  for (const c of willOverwrite) {
-    if (c.kind !== "conflict") continue;
-    const task = startTask(c.skill.name);
-    try {
-      await client.updateSkillPageProperties(
-        c.existingPageId,
-        c.skill.properties,
-        existingColumns,
-      );
-      if (c.skill.body.trim()) {
-        await ntnSetPageMarkdown(c.existingPageId, c.skill.body);
-      }
-      await pushSkillFiles(client, c.existingPageId, c.skill.source);
-      updated.push({
-        name: c.skill.name,
-        pageId: c.existingPageId,
-        sources: allSources(c),
-      });
-      task.done("(updated)");
-    } catch (err) {
-      failed.push(c.skill.name);
-      task.fail((err as Error).message.split("\n")[0]);
-    }
-  }
-
-  // ---------- Phase 2: back up local copies whose Notion write succeeded ----------
-  //
-  // Only move sources that live INSIDE a configured scope target dir
-  // (e.g. ~/.claude/skills/foo). Those need to be replaced by symlinks
-  // to the central store. Central-store sources (~/.notion-skills/skills/)
-  // are already in their permanent home — moving them would erase the
-  // skill we just uploaded. Sources from --from paths are also left
-  // untouched since they may be a user's authoritative authoring repo.
-  const ts = timestamp();
-  const backupRoot = join(ROOT_DIR, "backup", `migrate-${ts}`);
-  let backupCreated = false;
-  const backupWarnings: string[] = [];
-
-  for (const result of [...created, ...updated]) {
-    let copyIndex = 0;
-    for (const src of result.sources) {
-      if (!sourceIsInScope(src, scopeTargetDirs)) continue;
-
-      if (!backupCreated) {
-        await mkdir(backupRoot, { recursive: true });
-        backupCreated = true;
-      }
-
-      // First source goes to backup/<name>; subsequent ones (multi-target
-      // duplicates) get a numeric suffix so they don't collide.
-      const destName = copyIndex === 0 ? result.name : `${result.name}.${copyIndex}`;
-      const dest = join(backupRoot, destName);
-      try {
-        await mkdir(dirname(dest), { recursive: true });
-        await rename(src, dest);
-      } catch (err) {
-        backupWarnings.push(`${src}: ${(err as Error).message}`);
-      }
-      copyIndex++;
-    }
-  }
+  // Phase 2: back up local sources that lived inside scope target dirs.
+  const { backupRoot, backupCreated, backupWarnings } = await backupOriginalSources(
+    [...created, ...updated],
+    scopeTargetDirs,
+  );
 
   // ---------- Phase 3: silent reconciliation ----------
   //
@@ -369,6 +161,240 @@ export async function migrateCommand(opts: MigrateOptions): Promise<void> {
     // Surface anything runSync flagged in its (otherwise-quiet) pass.
     printSummary(summary);
   }
+}
+
+// ---------- phases extracted from the orchestrator above ----------
+
+async function discoverAndClassify(
+  client: NotionClient,
+  source: Source,
+  opts: MigrateOptions,
+  scopeTargetDirs: string[],
+  verbose: boolean,
+): Promise<Classification[]> {
+  const sourceDirs = resolveSourceDirs({
+    extras: [SKILLS_STORE, ...(opts.from ?? [])],
+    targetDirs: scopeTargetDirs,
+  });
+
+  // Skills already in the central store + already in this source's
+  // manifest are tracked — they're sync targets, not migrate candidates.
+  const manifest = await readManifest(MANIFEST_FILE, source.key);
+  const trackedNames = new Set(
+    manifest
+      ? Object.values(manifest.skills)
+          .filter((e) => e.source_key === source.key)
+          .map((e) => e.source_slug)
+      : [],
+  );
+
+  if (verbose) {
+    console.log(chalk.bold(`Sources:`));
+    for (const dir of sourceDirs) {
+      console.log(`  ${dir}${existsSync(dir) ? "" : chalk.dim(" (does not exist)")}`);
+    }
+    console.log("");
+  }
+
+  let classifications = await discoverSkills({ sourceDirs, trackedNames });
+
+  // Conflict detection: the title slugs of pages currently in Notion.
+  if (verbose) process.stdout.write(chalk.dim("Checking Notion for existing skills... "));
+  const existing = await client.queryDataSource(source.data_source_id);
+  if (verbose) console.log(chalk.green("✓") + chalk.dim(` ${existing.length} pages`));
+
+  const existingByName = new Map<string, { pageId: string; title: string }>();
+  const { slugify } = await import("../convert.js");
+  for (const page of existing) {
+    if (page.archived || page.in_trash) continue;
+    const titleProp = Object.values(page.properties).find((p) => p.type === "title");
+    const title = (titleProp?.title ?? [])
+      .map((r) => r.plain_text)
+      .join("")
+      .trim();
+    if (!title) continue;
+    existingByName.set(slugify(title), { pageId: page.id, title });
+  }
+  classifications = markConflicts(classifications, existingByName);
+
+  if (opts.only) {
+    const onlySet = new Set(opts.only);
+    classifications = classifications.filter(
+      (c) => (c.kind === "new" || c.kind === "conflict") && onlySet.has(c.skill.name),
+    );
+  }
+  return classifications;
+}
+
+async function confirmIntent(
+  newCount: number,
+  overwriteCount: number,
+  sourceName: string,
+  opts: MigrateOptions,
+): Promise<boolean> {
+  if (opts.yes) return true;
+  const newWord = newCount === 1 ? "page" : "pages";
+  const ok = await confirm({
+    message: `Create ${newCount} new ${newWord}${
+      overwriteCount ? ` and overwrite ${overwriteCount}` : ""
+    } in "${sourceName}"?`,
+    default: true,
+  });
+  if (!ok) console.log(chalk.dim("Aborted."));
+  return ok;
+}
+
+async function prepareSchemaAndOptions(
+  client: NotionClient,
+  source: Source,
+  candidates: Classification[],
+): Promise<void> {
+  // Progressive schema: only add columns the about-to-upload skills
+  // actually need. Spec defaults are filtered by notionPropsForSkill so
+  // we don't surface columns where every cell would be the default.
+  const neededProps = new Set<string>();
+  for (const c of candidates) {
+    if (c.kind !== "new" && c.kind !== "conflict") continue;
+    for (const name of notionPropsForSkill(
+      c.skill.properties as unknown as Record<string, unknown>,
+    )) {
+      neededProps.add(name);
+    }
+  }
+  if (neededProps.size > 0) {
+    await client.upgradeSchema(source.data_source_id, { only: neededProps });
+  }
+  // Self-heal selects: any unknown agent / model values referenced by
+  // the migration get added to the option list before the page-create
+  // call. Must run AFTER upgradeSchema so the columns exist.
+  const selfHealing = collectSelfHealingValues(candidates);
+  if (selfHealing.size > 0) {
+    await client.ensureSelectOptions(source.data_source_id, selfHealing);
+  }
+}
+
+interface PushResult {
+  name: string;
+  pageId: string;
+  sources: string[];
+}
+
+interface PushSummary {
+  created: PushResult[];
+  updated: PushResult[];
+  failed: string[];
+}
+
+async function pushAllPages(
+  client: NotionClient,
+  source: Source,
+  willCreate: Classification[],
+  willOverwrite: Classification[],
+  existingColumns: Set<string>,
+): Promise<PushSummary> {
+  const created: PushResult[] = [];
+  const updated: PushResult[] = [];
+  const failed: string[] = [];
+
+  for (const c of willCreate) {
+    if (c.kind !== "new") continue;
+    const result = await pushOnePage(client, source, c, false, existingColumns);
+    if (result) created.push(result);
+    else failed.push(c.skill.name);
+  }
+  for (const c of willOverwrite) {
+    if (c.kind !== "conflict") continue;
+    const result = await pushOnePage(client, source, c, true, existingColumns);
+    if (result) updated.push(result);
+    else failed.push(c.skill.name);
+  }
+  return { created, updated, failed };
+}
+
+async function pushOnePage(
+  client: NotionClient,
+  source: Source,
+  c: Classification,
+  isOverwrite: boolean,
+  existingColumns: Set<string>,
+): Promise<PushResult | null> {
+  if (c.kind !== "new" && c.kind !== "conflict") return null;
+  const task = startTask(c.skill.name);
+  try {
+    const pageId =
+      c.kind === "conflict"
+        ? c.existingPageId
+        : await client.createSkillPage(
+            source.data_source_id,
+            // CLI publish is an explicit "ship it" gesture — start as
+            // Published=true. Notion-side drafts (created in the UI)
+            // default to Published=false instead.
+            { ...c.skill.properties, published: true },
+            existingColumns,
+          );
+    if (c.kind === "conflict") {
+      await client.updateSkillPageProperties(pageId, c.skill.properties, existingColumns);
+    }
+    if (c.skill.body.trim()) {
+      await ntnSetPageMarkdown(pageId, c.skill.body);
+    }
+    await pushSkillFiles(client, pageId, c.skill.source);
+    task.done(isOverwrite ? "(updated)" : undefined);
+    return { name: c.skill.name, pageId, sources: allSources(c) };
+  } catch (err) {
+    task.fail((err as Error).message.split("\n")[0]);
+    return null;
+  }
+}
+
+function allSources(c: Classification): string[] {
+  if (c.kind !== "new" && c.kind !== "conflict") return [];
+  return [
+    c.skill.source,
+    ...(c.skill.additionalSources ?? []),
+    ...(c.skill.conflictingSources ?? []),
+  ];
+}
+
+interface BackupResult {
+  backupRoot: string;
+  backupCreated: boolean;
+  backupWarnings: string[];
+}
+
+async function backupOriginalSources(
+  results: PushResult[],
+  scopeTargetDirs: string[],
+): Promise<BackupResult> {
+  // Move sources living inside scope target dirs (e.g.
+  // ~/.claude/skills/foo) to backup; they need to be replaced by
+  // symlinks to the central store. Central-store sources are already
+  // in their permanent home; --from sources may be the user's
+  // authoritative authoring repo and stay untouched.
+  const backupRoot = join(ROOT_DIR, "backup", `migrate-${timestamp()}`);
+  let backupCreated = false;
+  const backupWarnings: string[] = [];
+  for (const result of results) {
+    let copyIndex = 0;
+    for (const src of result.sources) {
+      if (!sourceIsInScope(src, scopeTargetDirs)) continue;
+      if (!backupCreated) {
+        await mkdir(backupRoot, { recursive: true });
+        backupCreated = true;
+      }
+      const destName =
+        copyIndex === 0 ? result.name : `${result.name}.${copyIndex}`;
+      const dest = join(backupRoot, destName);
+      try {
+        await mkdir(dirname(dest), { recursive: true });
+        await rename(src, dest);
+      } catch (err) {
+        backupWarnings.push(`${src}: ${(err as Error).message}`);
+      }
+      copyIndex++;
+    }
+  }
+  return { backupRoot, backupCreated, backupWarnings };
 }
 
 function printClassifications(

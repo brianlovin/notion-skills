@@ -11,7 +11,7 @@ description: >
   init, upgrade, open, import, source.
 type: core
 library: notion-skills
-library_version: "0.11.3"
+library_version: "0.11.4"
 sources:
   - README.md
   - CLAUDE.md

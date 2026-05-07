@@ -1,6 +1,6 @@
 {
   "name": "@brianlovin/notion-skills",
-  "version": "0.11.3",
+  "version": "0.11.4",
   "description": "Sync agent skills from a Notion database to Claude Code, Codex, OpenCode, Cursor, Gemini CLI.",
   "type": "module",
   "bin": {

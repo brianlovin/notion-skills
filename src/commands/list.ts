@@ -1,5 +1,6 @@
 import chalk from "chalk";
 import { existsSync, readdirSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   NotionClient,
@@ -12,7 +13,7 @@ import {
 } from "../notion.js";
 import { assertNtnInstalled } from "../ntn.js";
 import { fetchPageContent, slugify } from "../convert.js";
-import { getScope } from "../scope.js";
+import { getScope, type Scope } from "../scope.js";
 import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
 import {
   type Manifest,
@@ -26,8 +27,7 @@ import {
   hashSkillContent,
 } from "../page-hash.js";
 import { applyRenames, detectRenames } from "../renames.js";
-import { readFile } from "node:fs/promises";
-import { type Source, defaultSource, findByKey } from "../sources.js";
+import { type Source, defaultSource } from "../sources.js";
 import { pickSource } from "./_resolve.js";
 
 interface ListOptions {
@@ -41,12 +41,7 @@ interface ListOptions {
   json?: boolean;
 }
 
-type SkillState =
-  | "installed"
-  | "outdated"
-  | "draft"
-  | "available"
-  | "invalid";
+type SkillState = "installed" | "outdated" | "draft" | "available" | "invalid";
 
 interface Row {
   /** local_slug for installed/draft, source_slug for available. */
@@ -64,17 +59,11 @@ interface Row {
 
 type SortKey = "name" | "popular" | "new";
 
-function normalizeSortKey(raw?: string): SortKey {
-  if (!raw) return "name";
-  const lower = raw.toLowerCase();
-  if (lower === "name" || lower === "alphabetical" || lower === "alpha") return "name";
-  if (lower === "popular" || lower === "installs" || lower === "downloads") return "popular";
-  if (lower === "new" || lower === "latest" || lower === "recent") return "new";
-  throw new Error(
-    `Unknown --sort value "${raw}". Options: name (alphabetical), popular (by install count), new (most recently created).`,
-  );
-}
-
+/**
+ * Top-level orchestrator. Each phase is a named helper below; the runner
+ * just sequences them. Goal is "readable as a recipe" — if a phase needs
+ * tweaking, it's obvious where to look.
+ */
 export async function listCommand(options: ListOptions = {}): Promise<void> {
   const scope = await getScope();
   if (!scope) {
@@ -84,211 +73,286 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
   await assertNtnInstalled();
   const client = new NotionClient();
 
-  // Tag/source filter scopes the source set we query. Otherwise we
-  // query every configured source for a cross-source view.
-  const targetSources: Source[] = options.source || options.tag
-    ? [await pickSource(options.source, scope)]
-    : scope.sources;
+  const sources = await resolveTargetSources(options, scope);
+  const manifest = await loadManifest(scope);
+  const pageCache = new Map<string, NotionPage[]>();
 
+  await applyRenameDetection(client, sources, manifest, pageCache);
+
+  const rows = await buildRowsFromSources(client, sources, manifest, pageCache);
+
+  await runDriftChecks(client, rows, manifest);
+
+  if (!options.source) {
+    await appendLocalDrafts(rows, manifest);
+  }
+
+  const filtered = applyFiltersAndSort(rows, options);
+
+  if (options.json) {
+    renderJson(filtered);
+    return;
+  }
+  renderTable(filtered, rows, scope, sources, options);
+}
+
+// ---------- phase 1: target-source resolution ----------
+
+async function resolveTargetSources(opts: ListOptions, scope: Scope): Promise<Source[]> {
+  // --source narrows to one explicitly. --tag is source-scoped (each
+  // Notion DB has its own tag set with its own semantics) so it falls
+  // back to the standard picker too. Otherwise: cross-source view.
+  if (opts.source || opts.tag) {
+    return [await pickSource(opts.source, scope)];
+  }
+  return scope.sources;
+}
+
+async function loadManifest(scope: Scope): Promise<Manifest | null> {
   const defaultKey =
     defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
-  const manifest = await readManifest(MANIFEST_FILE, defaultKey);
-  const contentRoot = SKILLS_STORE;
+  return readManifest(MANIFEST_FILE, defaultKey);
+}
 
-  // Apply rename detection per-source: a Notion-side title change
-  // updates entry.source_slug in-place. local_slug never moves.
-  if (manifest) {
-    let touched = false;
-    for (const source of targetSources) {
-      const pages = await getOrFetchPages(client, source);
-      const ops = detectRenames(manifest, source.key, pages);
-      if (ops.length > 0) {
-        applyRenames(manifest, ops);
-        touched = true;
-        for (const op of ops) {
-          console.log(
-            chalk.cyan(
-              `↪ ${op.oldSourceSlug} → ${op.newSourceSlug} ${chalk.dim(`(${source.key}; local '${op.localSlug}' stays)`)}`,
-            ),
-          );
-        }
-      }
-    }
-    if (touched) {
-      try {
-        await writeManifest(MANIFEST_FILE, manifest);
-      } catch {
-        // best-effort cache update
-      }
+// ---------- phase 2: rename detection (mutates manifest in place) ----------
+
+async function applyRenameDetection(
+  client: NotionClient,
+  sources: Source[],
+  manifest: Manifest | null,
+  pageCache: Map<string, NotionPage[]>,
+): Promise<void> {
+  if (!manifest) return;
+  let touched = false;
+  for (const source of sources) {
+    const pages = await fetchPagesCached(client, source, pageCache);
+    const ops = detectRenames(manifest, source.key, pages);
+    if (ops.length === 0) continue;
+    applyRenames(manifest, ops);
+    touched = true;
+    for (const op of ops) {
+      console.log(
+        chalk.cyan(
+          `↪ ${op.oldSourceSlug} → ${op.newSourceSlug} ${chalk.dim(`(${source.key}; local '${op.localSlug}' stays)`)}`,
+        ),
+      );
     }
   }
-
-  // Build a quick lookup for installed entries: (source_key, source_slug)
-  // → local_slug + entry.
-  const installedLookup = new Map<string, { localSlug: string; entry: ManifestEntry }>();
-  if (manifest) {
-    for (const [localSlug, entry] of Object.entries(manifest.skills)) {
-      installedLookup.set(`${entry.source_key}/${entry.source_slug}`, { localSlug, entry });
-    }
+  if (!touched) return;
+  try {
+    await writeManifest(MANIFEST_FILE, manifest);
+  } catch {
+    // best-effort: persistence failure here is recoverable on next sync.
   }
+}
 
+// ---------- phase 3: build rows from each source's pages ----------
+
+async function buildRowsFromSources(
+  client: NotionClient,
+  sources: Source[],
+  manifest: Manifest | null,
+  pageCache: Map<string, NotionPage[]>,
+): Promise<Row[]> {
+  const installedLookup = buildInstalledLookup(manifest);
   const rows: Row[] = [];
-
-  // Pass 1: rows from each source's data source.
-  for (const source of targetSources) {
-    const pages = await getOrFetchPages(client, source);
+  for (const source of sources) {
+    const pages = await fetchPagesCached(client, source, pageCache);
     const publishedColumnExists = pages.some(
       (p) => p.properties.Published !== undefined,
     );
     for (const page of pages) {
       if (page.archived || page.in_trash) continue;
-      const title = readTitle(page.properties);
-      if (!title) {
-        rows.push({
-          name: "—",
-          source_key: source.key,
-          title: "(untitled)",
-          description: "",
-          tags: [],
-          installs: 0,
-          state: "invalid",
-          reason: "no title",
-          createdTime: page.created_time,
-        });
-        continue;
-      }
-      const sourceSlug = slugify(title);
-      const description = readRichText(page.properties, "Description");
-      const tags = readMultiSelect(page.properties, "Tags");
-      const installs = readNumber(page.properties, "Installs");
-      const isDraft =
-        publishedColumnExists && !readCheckbox(page.properties, "Published");
-
-      const installed = installedLookup.get(`${source.key}/${sourceSlug}`);
-      if (!installed) {
-        rows.push({
-          name: sourceSlug,
-          source_key: source.key,
-          title,
-          description,
-          tags,
-          installs,
-          state: isDraft ? "draft" : "available",
-          createdTime: page.created_time,
-        });
-        continue;
-      }
-      rows.push({
-        name: installed.localSlug,
-        source_key: source.key,
-        title,
-        description,
-        tags,
-        installs,
-        state: "installed",
-        _page: page,
-        createdTime: page.created_time,
-      });
+      const row = pageToRow(page, source, installedLookup, publishedColumnExists);
+      rows.push(row);
     }
   }
+  return rows;
+}
 
-  // Pass 1.5: drift-check installed rows.
-  const manifestPatches: Array<[string, Partial<ManifestEntry>]> = [];
+function buildInstalledLookup(
+  manifest: Manifest | null,
+): Map<string, { localSlug: string; entry: ManifestEntry }> {
+  const lookup = new Map<string, { localSlug: string; entry: ManifestEntry }>();
+  if (!manifest) return lookup;
+  for (const [localSlug, entry] of Object.entries(manifest.skills)) {
+    lookup.set(`${entry.source_key}/${entry.source_slug}`, { localSlug, entry });
+  }
+  return lookup;
+}
+
+function pageToRow(
+  page: NotionPage,
+  source: Source,
+  installedLookup: Map<string, { localSlug: string; entry: ManifestEntry }>,
+  publishedColumnExists: boolean,
+): Row {
+  const title = readTitle(page.properties);
+  if (!title) {
+    return {
+      name: "—",
+      source_key: source.key,
+      title: "(untitled)",
+      description: "",
+      tags: [],
+      installs: 0,
+      state: "invalid",
+      reason: "no title",
+      createdTime: page.created_time,
+    };
+  }
+  const sourceSlug = slugify(title);
+  const description = readRichText(page.properties, "Description");
+  const tags = readMultiSelect(page.properties, "Tags");
+  const installs = readNumber(page.properties, "Installs");
+  const isDraft =
+    publishedColumnExists && !readCheckbox(page.properties, "Published");
+
+  const installed = installedLookup.get(`${source.key}/${sourceSlug}`);
+  if (!installed) {
+    return {
+      name: sourceSlug,
+      source_key: source.key,
+      title,
+      description,
+      tags,
+      installs,
+      state: isDraft ? "draft" : "available",
+      createdTime: page.created_time,
+    };
+  }
+  return {
+    name: installed.localSlug,
+    source_key: source.key,
+    title,
+    description,
+    tags,
+    installs,
+    state: "installed",
+    _page: page,
+    createdTime: page.created_time,
+  };
+}
+
+// ---------- phase 4: drift check (turns "installed" into "outdated") ----------
+
+async function runDriftChecks(
+  client: NotionClient,
+  rows: Row[],
+  manifest: Manifest | null,
+): Promise<void> {
+  if (!manifest) return;
+  const patches: Array<[string, Partial<ManifestEntry>]> = [];
   for (const row of rows) {
-    if (row.state !== "installed" || !row._page || !manifest) continue;
+    if (row.state !== "installed" || !row._page) continue;
     const entry = manifest.skills[row.name];
     if (!entry) continue;
     const result = await checkDrift(client, row._page, entry, manifest);
     if (result.outdated) {
       row.state = "outdated";
-    } else if (
-      result.refreshedLastEditedTime ||
-      result.refreshedBodyHash !== undefined
-    ) {
+    } else if (result.refreshedLastEditedTime || result.refreshedBodyHash !== undefined) {
       const patch: Partial<ManifestEntry> = {};
       if (result.refreshedLastEditedTime) patch.last_edited_time = result.refreshedLastEditedTime;
       if (result.refreshedBodyHash !== undefined) patch.body_hash = result.refreshedBodyHash;
-      manifestPatches.push([row.name, patch]);
+      patches.push([row.name, patch]);
     }
     delete row._page;
   }
-  if (manifest && manifestPatches.length > 0) {
-    const next: Manifest = { ...manifest, hash_v: HASH_V, skills: { ...manifest.skills } };
-    for (const [localSlug, patch] of manifestPatches) {
-      const existing = next.skills[localSlug];
-      if (existing) next.skills[localSlug] = { ...existing, ...patch };
-    }
-    try {
-      await writeManifest(MANIFEST_FILE, next);
-    } catch {
-      // best-effort
-    }
+  if (patches.length === 0) return;
+  // Persist refreshed cache so the next list takes the fast path.
+  const next: Manifest = { ...manifest, hash_v: HASH_V, skills: { ...manifest.skills } };
+  for (const [localSlug, patch] of patches) {
+    const existing = next.skills[localSlug];
+    if (existing) next.skills[localSlug] = { ...existing, ...patch };
   }
-
-  // Pass 2: drafts — central-store dirs not represented anywhere above.
-  // Local-only drafts have source_key = null. Skipped when --source
-  // narrows the view to one source: drafts and installed-elsewhere
-  // entries don't belong in that source's frame.
-  const sourceFilterActive = !!options.source;
-  if (existsSync(contentRoot) && !sourceFilterActive) {
-    const knownLocalSlugs = new Set(rows.map((r) => r.name).filter((n) => n !== "—"));
-    let entries: string[];
-    try {
-      entries = readdirSync(contentRoot);
-    } catch {
-      entries = [];
-    }
-    for (const entry of entries) {
-      if (entry.startsWith(".")) continue;
-      const dir = join(contentRoot, entry);
-      try {
-        if (!statSync(dir).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-      if (knownLocalSlugs.has(entry)) continue;
-      const file = join(dir, "SKILL.md");
-      let description = "";
-      let tags: string[] = [];
-      try {
-        const md = await readFile(file, "utf8");
-        const fm = extractFrontmatterText(md);
-        description = readFmString(fm, "description");
-        tags = readFmList(fm, "tags");
-      } catch {
-        // ignore
-      }
-      const manifestEntry = manifest?.skills[entry];
-      rows.push({
-        name: entry,
-        source_key: manifestEntry?.source_key ?? null,
-        title: entry,
-        description,
-        tags,
-        installs: 0,
-        createdTime: "",
-        state: manifestEntry ? "installed" : "draft",
-      });
-    }
+  try {
+    await writeManifest(MANIFEST_FILE, next);
+  } catch {
+    // best-effort
   }
+}
 
-  // Filter by --installed / --available / --outdated / --drafts.
+// ---------- phase 5: append local drafts (off-source skill dirs) ----------
+
+async function appendLocalDrafts(rows: Row[], manifest: Manifest | null): Promise<void> {
+  const contentRoot = SKILLS_STORE;
+  if (!existsSync(contentRoot)) return;
+  const knownLocalSlugs = new Set(rows.map((r) => r.name).filter((n) => n !== "—"));
+  let entries: string[];
+  try {
+    entries = readdirSync(contentRoot);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.startsWith(".")) continue;
+    const dir = join(contentRoot, entry);
+    try {
+      if (!statSync(dir).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    if (knownLocalSlugs.has(entry)) continue;
+    const draft = await loadDraftRow(entry, dir, manifest);
+    rows.push(draft);
+  }
+}
+
+async function loadDraftRow(
+  localSlug: string,
+  dir: string,
+  manifest: Manifest | null,
+): Promise<Row> {
+  const file = join(dir, "SKILL.md");
+  let description = "";
+  let tags: string[] = [];
+  try {
+    const md = await readFile(file, "utf8");
+    const fm = extractFrontmatterText(md);
+    description = readFmString(fm, "description");
+    tags = readFmList(fm, "tags");
+  } catch {
+    // ignore — a draft without a SKILL.md is still a valid row
+  }
+  const manifestEntry = manifest?.skills[localSlug];
+  return {
+    name: localSlug,
+    source_key: manifestEntry?.source_key ?? null,
+    title: localSlug,
+    description,
+    tags,
+    installs: 0,
+    createdTime: "",
+    state: manifestEntry ? "installed" : "draft",
+  };
+}
+
+// ---------- phase 6: filter + sort ----------
+
+function applyFiltersAndSort(rows: Row[], opts: ListOptions): Row[] {
   const stateFilter = new Set<SkillState>();
-  if (options.installed) stateFilter.add("installed");
-  if (options.installed) stateFilter.add("outdated");
-  if (options.available) stateFilter.add("available");
-  if (options.outdated) stateFilter.add("outdated");
-  if (options.drafts) stateFilter.add("draft");
+  if (opts.installed) {
+    stateFilter.add("installed");
+    stateFilter.add("outdated");
+  }
+  if (opts.available) stateFilter.add("available");
+  if (opts.outdated) stateFilter.add("outdated");
+  if (opts.drafts) stateFilter.add("draft");
+
+  const wantedTags =
+    opts.tag && opts.tag.length > 0
+      ? opts.tag.flatMap((t) => t.split(",")).map((t) => t.trim()).filter(Boolean)
+      : [];
+
   const filtered = rows.filter((row) => {
     if (stateFilter.size > 0 && !stateFilter.has(row.state)) return false;
-    if (options.tag && options.tag.length > 0) {
-      const wanted = options.tag.flatMap((t) => t.split(",")).map((t) => t.trim()).filter(Boolean);
-      if (wanted.length > 0 && !wanted.every((w) => row.tags.includes(w))) return false;
+    if (wantedTags.length > 0 && !wantedTags.every((w) => row.tags.includes(w))) {
+      return false;
     }
     return true;
   });
 
-  const sortKey = normalizeSortKey(options.sort);
+  const sortKey = normalizeSortKey(opts.sort);
   if (sortKey === "popular") {
     filtered.sort((a, b) => {
       if (b.installs !== a.installs) return b.installs - a.installs;
@@ -312,30 +376,50 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
       return a.name.localeCompare(b.name);
     });
   }
+  return filtered;
+}
 
-  if (options.json) {
-    const out = filtered.map((r) => ({
-      name: r.name,
-      source: r.source_key,
-      title: r.title,
-      description: r.description,
-      tags: r.tags,
-      installs: r.installs,
-      state: r.state,
-      ...(r.reason ? { reason: r.reason } : {}),
-    }));
-    console.log(JSON.stringify(out, null, 2));
-    return;
-  }
+function normalizeSortKey(raw?: string): SortKey {
+  if (!raw) return "name";
+  const lower = raw.toLowerCase();
+  if (lower === "name" || lower === "alphabetical" || lower === "alpha") return "name";
+  if (lower === "popular" || lower === "installs" || lower === "downloads") return "popular";
+  if (lower === "new" || lower === "latest" || lower === "recent") return "new";
+  throw new Error(
+    `Unknown --sort value "${raw}". Options: name (alphabetical), popular (by install count), new (most recently created).`,
+  );
+}
 
-  // Header.
+// ---------- phase 7: render ----------
+
+function renderJson(filtered: Row[]): void {
+  const out = filtered.map((r) => ({
+    name: r.name,
+    source: r.source_key,
+    title: r.title,
+    description: r.description,
+    tags: r.tags,
+    installs: r.installs,
+    state: r.state,
+    ...(r.reason ? { reason: r.reason } : {}),
+  }));
+  console.log(JSON.stringify(out, null, 2));
+}
+
+function renderTable(
+  filtered: Row[],
+  allRows: Row[],
+  scope: Scope,
+  targetSources: Source[],
+  opts: ListOptions,
+): void {
   const isFiltered =
-    options.installed ||
-    options.available ||
-    options.outdated ||
-    options.drafts ||
-    options.source ||
-    (options.tag && options.tag.length > 0);
+    opts.installed ||
+    opts.available ||
+    opts.outdated ||
+    opts.drafts ||
+    opts.source ||
+    (opts.tag && opts.tag.length > 0);
   const headerLabel =
     scope.sources.length === 1
       ? scope.sources[0]!.name
@@ -351,23 +435,43 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
     }
     console.log(
       chalk.dim(
-        `${filtered.length} of ${rows.length} ${rows.length === 1 ? "skill" : "skills"} match.`,
+        `${filtered.length} of ${allRows.length} ${allRows.length === 1 ? "skill" : "skills"} match.`,
       ),
     );
   } else {
-    console.log(chalk.dim(`${rows.length} ${rows.length === 1 ? "skill" : "skills"} total`));
+    console.log(chalk.dim(`${allRows.length} ${allRows.length === 1 ? "skill" : "skills"} total`));
   }
   console.log("");
 
+  const layout = computeTableLayout(filtered, scope);
+  console.log(chalk.dim(layout.header));
+  for (const row of filtered) {
+    console.log(formatRow(row, layout));
+  }
+
+  console.log("");
+  console.log(chalk.dim(`  ${formatSummaryLine(filtered) || "no skills"}`));
+  console.log("");
+}
+
+interface TableLayout {
+  header: string;
+  namePad: number;
+  sourceWidth: number; // 0 when source column is hidden
+  installsWidth: number;
+  descBudget: number;
+}
+
+function computeTableLayout(rows: Row[], scope: Scope): TableLayout {
   const showSourceColumn = scope.sources.length > 1;
-  const DESC_CAP = 70;
   const INSTALLS_HEADER = "INSTALLS";
-  const installsWidth = INSTALLS_HEADER.length;
   const SOURCE_HEADER = "SOURCE";
+  const DESC_CAP = 70;
+  const installsWidth = INSTALLS_HEADER.length;
   const sourceWidth = showSourceColumn
     ? Math.max(SOURCE_HEADER.length, ...scope.sources.map((s) => s.key.length))
     : 0;
-  const maxName = Math.max("NAME".length, ...filtered.map((r) => r.name.length));
+  const maxName = Math.max("NAME".length, ...rows.map((r) => r.name.length));
   const namePad = Math.min(40, Math.max(maxName, 12));
   const cols = process.stdout.columns ?? 120;
   const fixedPrefix =
@@ -377,51 +481,38 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
   let header = "  " + "  " + "NAME".padEnd(namePad);
   if (showSourceColumn) header += "  " + SOURCE_HEADER.padEnd(sourceWidth);
   header += "  " + INSTALLS_HEADER.padStart(installsWidth) + "  " + "DESCRIPTION";
-  console.log(chalk.dim(header));
+  return { header, namePad, sourceWidth, installsWidth, descBudget };
+}
 
-  for (const row of filtered) {
-    const mark = stateMarker(row.state);
-    const namePadded = row.name.padEnd(namePad);
-    const sourceCell = showSourceColumn
-      ? "  " + chalk.dim((row.source_key ?? "—").padEnd(sourceWidth))
+function formatRow(row: Row, layout: TableLayout): string {
+  const mark = stateMarker(row.state);
+  const namePadded = row.name.padEnd(layout.namePad);
+  const sourceCell =
+    layout.sourceWidth > 0
+      ? "  " + chalk.dim((row.source_key ?? "—").padEnd(layout.sourceWidth))
       : "";
-    const installsCell =
-      row.installs > 0
-        ? chalk.cyan(String(row.installs).padStart(installsWidth))
-        : " ".repeat(installsWidth);
-    const desc = truncate(oneLine(row.description), descBudget);
-    const tagText = row.tags.length > 0 ? chalk.dim(` [${row.tags.join(", ")}]`) : "";
-    const reason = row.reason ? chalk.dim(` (${row.reason})`) : "";
-    console.log(
-      `  ${mark} ${namePadded}${sourceCell}  ${installsCell}  ${chalk.dim(desc)}${tagText}${reason}`,
-    );
-  }
+  const installsCell =
+    row.installs > 0
+      ? chalk.cyan(String(row.installs).padStart(layout.installsWidth))
+      : " ".repeat(layout.installsWidth);
+  const desc = truncate(oneLine(row.description), layout.descBudget);
+  const tagText = row.tags.length > 0 ? chalk.dim(` [${row.tags.join(", ")}]`) : "";
+  const reason = row.reason ? chalk.dim(` (${row.reason})`) : "";
+  return `  ${mark} ${namePadded}${sourceCell}  ${installsCell}  ${chalk.dim(desc)}${tagText}${reason}`;
+}
 
-  const counts = filtered.reduce(
+function formatSummaryLine(rows: Row[]): string {
+  const counts = rows.reduce(
     (acc, r) => ({ ...acc, [r.state]: (acc[r.state] ?? 0) + 1 }),
     {} as Record<SkillState, number>,
   );
-  console.log("");
   const parts: string[] = [];
   if (counts.installed) parts.push(`${counts.installed} installed`);
   if (counts.outdated) parts.push(`${counts.outdated} outdated`);
   if (counts.draft) parts.push(`${counts.draft} ${counts.draft === 1 ? "draft" : "drafts"}`);
   if (counts.available) parts.push(`${counts.available} available`);
   if (counts.invalid) parts.push(`${counts.invalid} invalid`);
-  console.log(chalk.dim(`  ${parts.join(" · ") || "no skills"}`));
-  console.log("");
-  // Avoid unused-import noise.
-  void findByKey;
-}
-
-// Per-list page cache so the rename pass and pass 1 share fetched pages.
-const pageCache = new WeakMap<Source, NotionPage[]>();
-async function getOrFetchPages(client: NotionClient, source: Source): Promise<NotionPage[]> {
-  const cached = pageCache.get(source);
-  if (cached) return cached;
-  const pages = await client.queryDataSource(source.data_source_id);
-  pageCache.set(source, pages);
-  return pages;
+  return parts.join(" · ");
 }
 
 function stateMarker(state: SkillState): string {
@@ -432,6 +523,20 @@ function stateMarker(state: SkillState): string {
     case "available": return chalk.dim("·");
     case "invalid": return chalk.yellow("!");
   }
+}
+
+// ---------- shared helpers ----------
+
+async function fetchPagesCached(
+  client: NotionClient,
+  source: Source,
+  cache: Map<string, NotionPage[]>,
+): Promise<NotionPage[]> {
+  const cached = cache.get(source.key);
+  if (cached) return cached;
+  const pages = await client.queryDataSource(source.data_source_id);
+  cache.set(source.key, pages);
+  return pages;
 }
 
 interface DriftResult {
