@@ -20,11 +20,10 @@ import {
   diffManifest,
   emptyManifest,
   hashContent,
-  readManifest,
+  loadManifest,
   writeManifest,
 } from "./manifest.js";
 import type { Source } from "./sources.js";
-import { defaultSource } from "./sources.js";
 import { computeLineDiff, hasChanges, renderUnifiedDiff } from "./diff.js";
 import { withSpinner } from "./commands/_progress.js";
 import {
@@ -264,8 +263,7 @@ async function queryAndSummarise(
 }
 
 async function loadOrEmptyManifest(scope: Scope): Promise<Manifest> {
-  const defaultKey = defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
-  return (await readManifest(MANIFEST_FILE, defaultKey)) ?? emptyManifest();
+  return (await loadManifest(scope.sources)) ?? emptyManifest();
 }
 
 // ---------- phase: rename detection (mutates manifest in place) ----------

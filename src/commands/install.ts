@@ -19,7 +19,7 @@ import {
 import {
   type Manifest,
   emptyManifest,
-  readManifest,
+  loadManifest,
   writeManifest,
 } from "../manifest.js";
 import {
@@ -39,7 +39,7 @@ import {
   detectSlugCollisions,
 } from "../slug-collisions.js";
 import { startTask } from "./_progress.js";
-import { type Source, parseSkillRef, defaultSource } from "../sources.js";
+import { type Source, parseSkillRef } from "../sources.js";
 import { chooseLocalSlug } from "../resolvers.js";
 import { pickSource } from "./_resolve.js";
 
@@ -84,8 +84,7 @@ export async function installCommand(
   await assertNtnInstalled();
   const client = new NotionClient();
 
-  const defaultKey = defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
-  const manifest = (await readManifest(MANIFEST_FILE, defaultKey)) ?? emptyManifest();
+  const manifest = (await loadManifest(scope.sources)) ?? emptyManifest();
 
   // Decide which sources to query and how candidates get matched.
   let candidates: Candidate[];

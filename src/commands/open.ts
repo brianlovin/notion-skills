@@ -3,11 +3,11 @@ import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { getScope } from "../scope.js";
-import { readManifest } from "../manifest.js";
-import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
-import { NotionClient, readTitle } from "../notion.js";
+import { loadManifest } from "../manifest.js";
+import { SKILLS_STORE } from "../paths.js";
+import { NotionClient } from "../notion.js";
 import { assertNtnInstalled } from "../ntn.js";
-import { slugify } from "../convert.js";
+import { findPageInSource } from "./_resolve.js";
 
 interface OpenOptions {
   local?: boolean;
@@ -60,10 +60,7 @@ export async function openCommand(
   // Drafts can't be opened in Notion (they don't exist there yet) —
   // point the user at --local.
   if (modes.length === 0) {
-    const { defaultSource } = await import("../sources.js");
-    const defaultKey =
-      defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
-    const manifest = await readManifest(MANIFEST_FILE, defaultKey);
+    const manifest = await loadManifest(scope.sources);
     const entry = manifest?.skills[slug];
     let pageId = entry?.page_id;
 
@@ -74,9 +71,11 @@ export async function openCommand(
         );
       }
       // Search every configured source for a matching slug.
+      await assertNtnInstalled();
+      const client = new NotionClient();
       let found: string | null = null;
       for (const s of scope.sources) {
-        found = await findPageIdInStore(s.data_source_id, slug);
+        found = await findPageInSource(client, s, slug);
         if (found) break;
       }
       if (!found) {
@@ -139,26 +138,6 @@ export async function openCommand(
 
 function notionPageUrl(pageId: string): string {
   return `https://www.notion.so/${pageId.replace(/-/g, "")}`;
-}
-
-/**
- * Slow-path slug lookup: the user is opening a not-yet-installed
- * skill. Query the data source and slugify titles to find a match.
- */
-async function findPageIdInStore(
-  dataSourceId: string,
-  slug: string,
-): Promise<string | null> {
-  await assertNtnInstalled();
-  const client = new NotionClient();
-  const pages = await client.queryDataSource(dataSourceId);
-  for (const page of pages) {
-    if (page.archived || page.in_trash) continue;
-    const title = readTitle(page.properties);
-    if (!title) continue;
-    if (slugify(title) === slug) return page.id;
-  }
-  return null;
 }
 
 function platformOpener(): string {

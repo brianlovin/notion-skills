@@ -13,8 +13,8 @@ import {
   type GenAgentDef,
 } from "../gen-agents.js";
 import { buildGenPrompt } from "../gen-prompt.js";
-import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
-import { readManifest } from "../manifest.js";
+import { SKILLS_STORE } from "../paths.js";
+import { loadManifest } from "../manifest.js";
 import {
   ensureSymlink,
   targetSkillPath,
@@ -80,10 +80,7 @@ export async function genCommand(
   // publishing. We don't push to Notion — that's the publish step.
   const added = newSkillDirs(SKILLS_STORE, skillsBefore);
   if (added.length > 0) {
-    const { defaultSource } = await import("../sources.js");
-    const defaultKey =
-      defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
-    const manifest = await readManifest(MANIFEST_FILE, defaultKey);
+    const manifest = await loadManifest(scope.sources);
     const trackedNames = new Set(
       manifest ? Object.keys(manifest.skills) : [],
     );

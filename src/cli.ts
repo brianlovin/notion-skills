@@ -21,6 +21,8 @@ import { unpublishCommand } from "./commands/unpublish.js";
 import { openCommand } from "./commands/open.js";
 import { auditCommand } from "./commands/audit.js";
 import { addCommand } from "./commands/add.js";
+import { feedbackCommand } from "./commands/feedback.js";
+import { feedCommand } from "./commands/feed.js";
 import {
   sourceAddCommand,
   sourceDefaultCommand,
@@ -137,6 +139,22 @@ program
   .option("--source <key>", "scope --all/--tag to this source; ignored for explicit refs")
   .option("--as <name>", "override the local slug (single-skill installs only)")
   .action(installCommand);
+
+program
+  .command("feedback")
+  .description("Read or post comments on a skill's Notion page (no Notion required for teammates).")
+  .argument("<slug>", "skill slug — bare (`deploy`) or qualified (`team/deploy`)")
+  .argument("[message...]", "if provided, post this comment; otherwise list existing comments")
+  .option("--source <key>", "scope a bare slug to a specific source")
+  .action((slug, messageParts, opts) => feedbackCommand(slug, messageParts, opts));
+
+program
+  .command("feed")
+  .description("What's new across your skill stores: newly published skills + updates to skills you have installed.")
+  .option("--since <window>", "time window (e.g. 7d, 30d, 2w, 12h)", "7d")
+  .option("--source <key>", "scope to a specific source")
+  .option("--json", "machine-readable JSON output")
+  .action(feedCommand);
 
 program
   .command("open")

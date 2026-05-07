@@ -634,6 +634,57 @@ export class NotionClient {
 
     return results;
   }
+
+  /**
+   * List page-level comments oldest-first. Notion returns them in
+   * ascending creation order, which is also chronological reading
+   * order — feedback callers reverse for newest-first display.
+   */
+  async listComments(pageId: string): Promise<NotionComment[]> {
+    const results: NotionComment[] = [];
+    let cursor: string | undefined;
+
+    do {
+      const search = new URLSearchParams({
+        block_id: pageId,
+        page_size: "100",
+      });
+      if (cursor) search.set("start_cursor", cursor);
+      const json = await this.request<{
+        results: NotionComment[];
+        next_cursor: string | null;
+        has_more: boolean;
+      }>("GET", `/v1/comments?${search.toString()}`);
+      results.push(...json.results);
+      cursor = json.has_more ? (json.next_cursor ?? undefined) : undefined;
+    } while (cursor);
+
+    return results;
+  }
+
+  /**
+   * Post a top-level comment on a page. Returns the created comment.
+   * `body` is plain text; we wrap it in a single rich_text run. Markdown
+   * isn't rendered (Notion's API only takes rich_text), but URLs auto-
+   * link in the UI.
+   */
+  async postComment(pageId: string, body: string): Promise<NotionComment> {
+    return this.request("POST", `/v1/comments`, {
+      parent: { page_id: pageId },
+      rich_text: [{ type: "text", text: { content: body } }],
+    });
+  }
+
+}
+
+export interface NotionComment {
+  id: string;
+  parent: { type: "page_id"; page_id: string };
+  discussion_id: string;
+  rich_text: NotionRichText[];
+  created_by: { id: string; object: "user" };
+  created_time: string;
+  last_edited_time: string;
 }
 
 // ---------- Property accessors ----------

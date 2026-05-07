@@ -4,9 +4,8 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { checkbox, confirm } from "@inquirer/prompts";
 import { getScope } from "../scope.js";
-import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
-import { readManifest } from "../manifest.js";
-import { defaultSource } from "../sources.js";
+import { SKILLS_STORE } from "../paths.js";
+import { loadManifest } from "../manifest.js";
 import { ensureSymlink, targetSkillPath, targetsForKeys } from "../targets.js";
 import { migrateCommand } from "./migrate.js";
 import {
@@ -162,9 +161,7 @@ export async function addCommand(refs: string[], opts: AddOptions = {}): Promise
     throw new Error("--as only applies when adding exactly one skill.");
   }
 
-  const defaultKey =
-    defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
-  const manifest = await readManifest(MANIFEST_FILE, defaultKey);
+  const manifest = await loadManifest(scope.sources);
 
   // Classify every picked candidate up front. The user sees the full
   // plan in a summary and confirms once; we never surprise them

@@ -1,6 +1,8 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
+import { MANIFEST_FILE } from "./paths.js";
+import { defaultSource, type Source } from "./sources.js";
 
 /**
  * Per-installed-skill state. Manifest is keyed by `local_slug` (the
@@ -156,6 +158,19 @@ export async function readManifest(file: string, defaultSourceKey: string): Prom
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
   }
+}
+
+/**
+ * Read the manifest from its canonical location, deriving the v1→v2
+ * migration default-source-key from the scope's configured sources.
+ *
+ * Most commands want this; only commands that operate against a
+ * specific Source for migration purposes (`migrate`, `source rename`)
+ * should call `readManifest` directly with an explicit key.
+ */
+export async function loadManifest(sources: Source[]): Promise<Manifest | null> {
+  const defaultKey = defaultSource(sources)?.key ?? sources[0]?.key ?? "default";
+  return readManifest(MANIFEST_FILE, defaultKey);
 }
 
 /**

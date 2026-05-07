@@ -3,6 +3,8 @@ import { select } from "@inquirer/prompts";
 import type { Scope } from "../scope.js";
 import type { Source } from "../sources.js";
 import { resolveTargetSource } from "../sources.js";
+import { NotionClient, readTitle } from "../notion.js";
+import { slugify } from "../convert.js";
 
 /**
  * Resolve the single Source a command should target. Wraps
@@ -46,4 +48,28 @@ export async function pickSource(
       value: s,
     })),
   });
+}
+
+/**
+ * Find a published, non-archived page in `source` whose slugified
+ * title matches `slug`. Returns the page id or null if no match.
+ *
+ * Used by `open`, `feedback`, and any other command that needs to
+ * resolve a slug to a Notion page when there's no manifest entry to
+ * fast-path through. One full data-source query per call; callers
+ * scope to a single source when possible to avoid repeated scans.
+ */
+export async function findPageInSource(
+  client: NotionClient,
+  source: Source,
+  slug: string,
+): Promise<string | null> {
+  const pages = await client.queryDataSource(source.data_source_id);
+  for (const page of pages) {
+    if (page.archived || page.in_trash) continue;
+    const title = readTitle(page.properties);
+    if (!title) continue;
+    if (slugify(title) === slug) return page.id;
+  }
+  return null;
 }

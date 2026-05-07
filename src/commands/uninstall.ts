@@ -6,7 +6,7 @@ import { confirm } from "@inquirer/prompts";
 import { getScope } from "../scope.js";
 import {
   type Manifest,
-  readManifest,
+  loadManifest,
   writeManifest,
 } from "../manifest.js";
 import { hashLocalSkillDir } from "../skill-files.js";
@@ -21,7 +21,6 @@ import {
 import { MANIFEST_FILE, ROOT_DIR, SKILLS_STORE } from "../paths.js";
 import { startTask } from "./_progress.js";
 import type { Source } from "../sources.js";
-import { defaultSource } from "../sources.js";
 import { pickSource } from "./_resolve.js";
 
 interface UninstallOptions {
@@ -63,9 +62,7 @@ export async function uninstallCommand(
     );
   }
 
-  const defaultKey =
-    defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
-  const manifest = await readManifest(MANIFEST_FILE, defaultKey);
+  const manifest = await loadManifest(scope.sources);
   const targetSlugs = await resolveTargets(slugs, opts, manifest, scope);
   if (targetSlugs.length === 0) {
     console.log(chalk.dim("No matching skills to remove."));

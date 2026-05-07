@@ -5,9 +5,9 @@ import { NotionClient, readTitle } from "../notion.js";
 import { assertNtnInstalled } from "../ntn.js";
 import { ntnApi } from "../ntn.js";
 import { slugify } from "../convert.js";
-import { readManifest, writeManifest } from "../manifest.js";
+import { loadManifest, writeManifest } from "../manifest.js";
 import { MANIFEST_FILE } from "../paths.js";
-import { defaultSource, findByKey } from "../sources.js";
+import { findByKey } from "../sources.js";
 import { pickSource } from "./_resolve.js";
 import { resolveInstalledRef } from "../resolvers.js";
 
@@ -44,9 +44,7 @@ export async function unpublishCommand(
 
   // First check the manifest: an installed skill knows its own source.
   // Skip the cross-source search in that case.
-  const defaultKey =
-    defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
-  const manifestEarly = await readManifest(MANIFEST_FILE, defaultKey);
+  const manifestEarly = await loadManifest(scope.sources);
   let pageId: string | undefined;
   let resolvedSourceKey: string | undefined;
 
@@ -100,7 +98,7 @@ export async function unpublishCommand(
   // Drop the manifest entry too — the skill is no longer in the store,
   // so it shouldn't be tracked as installed. Local copy stays on disk
   // (effectively a draft); user can re-publish or uninstall.
-  const manifest = await readManifest(MANIFEST_FILE, defaultKey);
+  const manifest = await loadManifest(scope.sources);
   if (manifest && manifest.skills[slug]) {
     const next = { ...manifest, skills: { ...manifest.skills } };
     delete next.skills[slug];

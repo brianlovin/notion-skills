@@ -11,7 +11,7 @@ description: >
   init, upgrade, open, import, source.
 type: core
 library: notion-skills
-library_version: "0.16.0"
+library_version: "0.17.0"
 sources:
   - README.md
   - CLAUDE.md
@@ -48,6 +48,8 @@ The verb mapping:
 | See what's available + what's installed | `list` |
 | Pull a skill from the store onto this machine | `install <slug>` (or `--tag <name>`, or `--all`) |
 | Pull updates for installed skills | `sync` |
+| What's new across stores (last 7d) | `feed` (or `--since 30d`, `--since 2w`) |
+| Read or post comments on a skill | `feedback <slug> [message...]` |
 | Remove from this machine | `uninstall <slug>` |
 | Retire from the team store | `unpublish <slug>` |
 | Open a skill in Notion (or in a local editor) | `open <slug>` (or `--local`, `--with <cmd>`, `-a <App>`, `--reveal`) |
@@ -126,6 +128,40 @@ notion-skills sync
 ```
 
 `sync` is pull-only. If the user has local edits, `sync` prints a "you have local edits — run `publish`" reminder per drifted skill but **does not** push or overwrite. If the user has BOTH local edits AND the page changed remotely, `sync` backs up the local file to `~/.notion-skills/backup/sync-overwrite-<ts>/` before pulling.
+
+### What's new across stores
+
+```bash
+notion-skills feed              # last 7d, all sources
+notion-skills feed --since 30d  # last month
+notion-skills feed --since 2w   # last two weeks
+notion-skills feed --since 12h  # last 12 hours
+notion-skills feed --source team
+notion-skills feed --json       # machine-readable
+```
+
+`feed` is the discovery surface. It splits activity into two buckets per source: **🆕 new** (skills published in the window the user doesn't have installed) and **📝 updated** (installed skills that changed in the window). Drafts are filtered out — feed is for team-ready content. Suggest `feed` when the user asks "what's new?" / "anything I should try?" / "did anything change recently?".
+
+### Read or post comments on a skill
+
+```bash
+notion-skills feedback <slug>                       # list comments
+notion-skills feedback <slug> "broke on Node 18"    # post a comment
+notion-skills feedback team/deploy "thanks!"        # qualified ref
+```
+
+`feedback` writes a Notion comment on the skill's page; the maintainer sees it in Notion's UI like any other comment thread. Bare invocation lists comments newest-first by relative time. The CLI shows when, not who — Notion's UI shows full author info if it matters; jump there with `notion-skills open <slug>`.
+
+**Use it during workflows, not just on user request.** When you (an AI agent) invoke a skill and notice something worth flagging, post feedback proactively — the maintainer can act on it without you having to surface it through chat. Good triggers:
+
+- The skill's instructions were wrong, ambiguous, or out of date for the situation you hit
+- You worked around a missing feature or edge case the skill didn't handle
+- The skill produced a great outcome that's worth crediting (positive feedback fuels iteration too)
+- A user asks you to "let X know" / "leave a note" about a skill they just used
+
+When posting feedback that came from an agent's own observation (not the user's words), say so plainly so the maintainer can weigh it: e.g. `notion-skills feedback deploy "agent-observed: the rollback step assumes a single-region deploy and fails silently in multi-region setups."` Brevity > prose; one paragraph max.
+
+Drafts (no Notion page yet) can't be commented on; the command tells the user to publish first.
 
 ### Pull a public skill from GitHub
 

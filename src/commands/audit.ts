@@ -2,9 +2,8 @@ import chalk from "chalk";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getScope } from "../scope.js";
-import { readManifest } from "../manifest.js";
-import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
-import { defaultSource } from "../sources.js";
+import { loadManifest } from "../manifest.js";
+import { SKILLS_STORE } from "../paths.js";
 import {
   type AuditTarget,
   type Issue,
@@ -45,9 +44,7 @@ export async function auditCommand(
     throw new Error("No scope configured. Run `notion-skills init` first.");
   }
 
-  const defaultKey =
-    defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
-  const manifest = await readManifest(MANIFEST_FILE, defaultKey);
+  const manifest = await loadManifest(scope.sources);
 
   const targets = await collectTargets(args, options, manifest);
   if (targets.length === 0) {

@@ -11,7 +11,7 @@ import {
 } from "../convert.js";
 import {
   type Manifest,
-  readManifest,
+  loadManifest,
   writeManifest,
 } from "../manifest.js";
 import {
@@ -31,7 +31,7 @@ import { parseSkillFile } from "../migrate.js";
 import { SCHEMA, notionPropsForSkill } from "../schema.js";
 import { getScope } from "../scope.js";
 import { startTask } from "./_progress.js";
-import { type Source, defaultSource, findByKey } from "../sources.js";
+import { type Source, findByKey } from "../sources.js";
 import { pickSource } from "./_resolve.js";
 
 interface PublishOptions {
@@ -73,9 +73,7 @@ export async function publishCommand(
     throw new Error("No scope configured. Run `notion-skills init` first.");
   }
 
-  const defaultKey =
-    defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
-  const manifest = await readManifest(MANIFEST_FILE, defaultKey);
+  const manifest = await loadManifest(scope.sources);
   const trackedNames = new Set(manifest ? Object.keys(manifest.skills) : []);
 
   if (slugs.length > 0) {

@@ -18,7 +18,7 @@ import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
 import {
   type Manifest,
   type ManifestEntry,
-  readManifest,
+  loadManifest,
   writeManifest,
 } from "../manifest.js";
 import {
@@ -27,7 +27,7 @@ import {
   hashSkillContent,
 } from "../page-hash.js";
 import { applyRenames, detectRenames } from "../renames.js";
-import { type Source, defaultSource } from "../sources.js";
+import { type Source } from "../sources.js";
 import { pickSource } from "./_resolve.js";
 import { readFrontmatterList, readFrontmatterString } from "../frontmatter.js";
 
@@ -75,7 +75,7 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
   const client = new NotionClient();
 
   const sources = await resolveTargetSources(options, scope);
-  const manifest = await loadManifest(scope);
+  const manifest = await loadManifest(scope.sources);
   const pageCache = new Map<string, NotionPage[]>();
 
   await applyRenameDetection(client, scope, sources, manifest, pageCache);
@@ -107,12 +107,6 @@ async function resolveTargetSources(opts: ListOptions, scope: Scope): Promise<So
     return [await pickSource(opts.source, scope)];
   }
   return scope.sources;
-}
-
-async function loadManifest(scope: Scope): Promise<Manifest | null> {
-  const defaultKey =
-    defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
-  return readManifest(MANIFEST_FILE, defaultKey);
 }
 
 // ---------- phase 2: rename detection (mutates manifest in place) ----------

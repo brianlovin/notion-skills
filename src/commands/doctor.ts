@@ -5,13 +5,13 @@ import { join } from "node:path";
 import { confirm } from "@inquirer/prompts";
 import { getScope, type Scope } from "../scope.js";
 import { ntnDoctor, ntnVersion } from "../ntn.js";
-import { readManifest } from "../manifest.js";
-import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
+import { loadManifest } from "../manifest.js";
+import { SKILLS_STORE } from "../paths.js";
 import { findTargetByKey, KNOWN_TARGETS } from "../known-targets.js";
 import { NotionClient } from "../notion.js";
 import { SCHEMA } from "../schema.js";
 import { detectSlugCollisions } from "../slug-collisions.js";
-import { type Source, defaultSource } from "../sources.js";
+import { type Source } from "../sources.js";
 
 interface DoctorOptions {
   fix?: boolean;
@@ -195,12 +195,8 @@ async function checkSlugCollisions(source: Source): Promise<CheckResult[]> {
 }
 
 async function checkManifestVsDisk(scope: Scope): Promise<CheckResult[]> {
-  const manifestPath = MANIFEST_FILE;
   const contentRoot = SKILLS_STORE;
-  const defaultKey =
-    defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
-
-  const manifest = await readManifest(manifestPath, defaultKey);
+  const manifest = await loadManifest(scope.sources);
   if (!manifest) {
     return [
       {
@@ -252,9 +248,7 @@ async function checkManifestVsDisk(scope: Scope): Promise<CheckResult[]> {
 }
 
 async function checkSymlinks(scope: Scope): Promise<CheckResult[]> {
-  const defaultKey =
-    defaultSource(scope.sources)?.key ?? scope.sources[0]?.key ?? "default";
-  const manifest = await readManifest(MANIFEST_FILE, defaultKey);
+  const manifest = await loadManifest(scope.sources);
   if (!manifest) return [];
 
   const out: CheckResult[] = [];
