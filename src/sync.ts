@@ -167,7 +167,7 @@ async function runSyncForSource(
   const queried = await queryAndSummarise(client, source, scope, io);
 
   const manifest = await loadOrEmptyManifest(scope);
-  applyRenamesForSource(manifest, source, queried.pages, io.log);
+  await applyRenamesForSource(manifest, source, queried.pages, scope, io.log);
 
   const kept = filterKept(queried.summaries, queried.colliding, manifest, source, options);
   const diff = computeFetchSet(manifest, source, kept);
@@ -265,21 +265,48 @@ async function loadOrEmptyManifest(scope: Scope): Promise<Manifest> {
 
 // ---------- phase: rename detection (mutates manifest in place) ----------
 
-function applyRenamesForSource(
+async function applyRenamesForSource(
   manifest: Manifest,
   source: Source,
   pages: NotionPage[],
+  scope: Scope,
   log: (s: string) => void,
-): void {
+): Promise<void> {
   const ops = detectRenames(manifest, source.key, pages);
   if (ops.length === 0) return;
-  applyRenames(manifest, ops);
-  for (const op of ops) {
-    log(
-      chalk.cyan(
-        `↪ ${op.oldSourceSlug} → ${op.newSourceSlug} ${chalk.dim(`(renamed in Notion; local '${op.localSlug}' stays)`)}`,
-      ),
-    );
+  const outcomes = await applyRenames(manifest, ops, SKILLS_STORE, scope.targets);
+  for (const outcome of outcomes) {
+    if (outcome.status === "renamed") {
+      const sameLocalName = outcome.newLocalSlug === outcome.op.localSlug;
+      const sourceChanged = outcome.op.oldSourceSlug !== outcome.op.newSourceSlug;
+      // Three log shapes:
+      //   - Source AND local both changed: "old → new (local: X → Y)"
+      //   - Only local changed (catch-up after legacy pinned-local
+      //     state): "local: X → new"
+      //   - Only source changed (collision kept local pinned, but
+      //     that's the source-only branch below — we only land here
+      //     when at least the local renames or both)
+      let line: string;
+      if (sourceChanged && !sameLocalName) {
+        line = `↪ ${outcome.op.oldSourceSlug} → ${outcome.op.newSourceSlug}` +
+          chalk.dim(` (local: ${outcome.op.localSlug} → ${outcome.newLocalSlug})`);
+      } else if (!sourceChanged && !sameLocalName) {
+        line = `↪ local: ${outcome.op.localSlug} → ${outcome.newLocalSlug} ${chalk.dim("(catching up)")}`;
+      } else {
+        line = `↪ ${outcome.op.oldSourceSlug} → ${outcome.op.newSourceSlug}`;
+      }
+      log(chalk.cyan(line));
+    } else {
+      const reason =
+        outcome.reason.kind === "collision-manifest"
+          ? `local slug "${outcome.reason.conflictWith}" is already in use`
+          : `local dir "${outcome.reason.path}" already exists`;
+      log(
+        chalk.yellow(
+          `⚠ ${outcome.op.oldSourceSlug} → ${outcome.op.newSourceSlug}: ${reason}. Updated source_slug only; local '${outcome.op.localSlug}' stays.`,
+        ),
+      );
+    }
   }
 }
 

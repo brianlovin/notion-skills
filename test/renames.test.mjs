@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyRenames, detectRenames } from "../dist/renames.js";
+import { classifyRenameOps, detectRenames } from "../dist/renames.js";
 
 function page(opts) {
   return {
@@ -109,23 +109,77 @@ test("page_id not in current query → no rename op", () => {
   assert.deepEqual(detectRenames(m, "team", []), []);
 });
 
-// applyRenames ————————————————————————————————————————————————————————
+// classifyRenameOps ———————————————————————————————————————————————————
 
-test("applyRenames updates source_slug in place", () => {
+test("classifyRenameOps: no collision → renamed with new local_slug", () => {
   const m = manifest({ alpha: { source_slug: "alpha", page_id: "page-a" } });
-  applyRenames(m, [
-    { pageId: "page-a", localSlug: "alpha", oldSourceSlug: "alpha", newSourceSlug: "renamed" },
-  ]);
-  assert.equal(m.skills.alpha.source_slug, "renamed");
-  // local_slug (manifest key) is stable; never changes.
-  assert.ok(m.skills.alpha);
+  const outcomes = classifyRenameOps(
+    [{ pageId: "page-a", localSlug: "alpha", oldSourceSlug: "alpha", newSourceSlug: "renamed" }],
+    m,
+    () => false,
+  );
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].status, "renamed");
+  assert.equal(outcomes[0].newLocalSlug, "renamed");
 });
 
-test("applyRenames is no-op on missing entries", () => {
+test("classifyRenameOps: manifest collision → source-only with reason", () => {
+  const m = manifest({
+    alpha: { source_slug: "alpha", page_id: "page-a" },
+    renamed: { source_slug: "renamed", page_id: "page-r" },
+  });
+  const outcomes = classifyRenameOps(
+    [{ pageId: "page-a", localSlug: "alpha", oldSourceSlug: "alpha", newSourceSlug: "renamed" }],
+    m,
+    () => false,
+  );
+  assert.equal(outcomes[0].status, "source-only");
+  if (outcomes[0].status === "source-only") {
+    assert.equal(outcomes[0].reason.kind, "collision-manifest");
+  }
+});
+
+test("classifyRenameOps: disk collision → source-only with disk reason", () => {
   const m = manifest({ alpha: { source_slug: "alpha", page_id: "page-a" } });
-  // local slug "ghost" doesn't exist; applyRenames silently skips.
-  applyRenames(m, [
-    { pageId: "page-x", localSlug: "ghost", oldSourceSlug: "ghost", newSourceSlug: "renamed" },
-  ]);
-  assert.equal(m.skills.alpha.source_slug, "alpha");
+  const outcomes = classifyRenameOps(
+    [{ pageId: "page-a", localSlug: "alpha", oldSourceSlug: "alpha", newSourceSlug: "renamed" }],
+    m,
+    (slug) => slug === "renamed",
+  );
+  assert.equal(outcomes[0].status, "source-only");
+  if (outcomes[0].status === "source-only") {
+    assert.equal(outcomes[0].reason.kind, "collision-disk");
+  }
+});
+
+test("classifyRenameOps: in-flight collision when two ops claim the same target", () => {
+  const m = manifest({
+    alpha: { source_slug: "alpha", page_id: "page-a" },
+    beta: { source_slug: "beta", page_id: "page-b" },
+  });
+  const outcomes = classifyRenameOps(
+    [
+      { pageId: "page-a", localSlug: "alpha", oldSourceSlug: "alpha", newSourceSlug: "shared" },
+      { pageId: "page-b", localSlug: "beta", oldSourceSlug: "beta", newSourceSlug: "shared" },
+    ],
+    m,
+    () => false,
+  );
+  // First wins; second is refused as collision-manifest (the target's
+  // already-spoken-for in this batch).
+  assert.equal(outcomes[0].status, "renamed");
+  assert.equal(outcomes[1].status, "source-only");
+});
+
+test("classifyRenameOps: noop when newSourceSlug equals localSlug", () => {
+  // Edge case: source_slug was stale but local_slug already matches
+  // the new source title (from a previous partial state). Should still
+  // succeed as "renamed" without claiming a different slug.
+  const m = manifest({ renamed: { source_slug: "alpha", page_id: "page-a" } });
+  const outcomes = classifyRenameOps(
+    [{ pageId: "page-a", localSlug: "renamed", oldSourceSlug: "alpha", newSourceSlug: "renamed" }],
+    m,
+    () => false,
+  );
+  assert.equal(outcomes[0].status, "renamed");
 });

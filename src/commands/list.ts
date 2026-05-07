@@ -77,7 +77,7 @@ export async function listCommand(options: ListOptions = {}): Promise<void> {
   const manifest = await loadManifest(scope);
   const pageCache = new Map<string, NotionPage[]>();
 
-  await applyRenameDetection(client, sources, manifest, pageCache);
+  await applyRenameDetection(client, scope, sources, manifest, pageCache);
 
   const rows = await buildRowsFromSources(client, sources, manifest, pageCache);
 
@@ -118,6 +118,7 @@ async function loadManifest(scope: Scope): Promise<Manifest | null> {
 
 async function applyRenameDetection(
   client: NotionClient,
+  scope: Scope,
   sources: Source[],
   manifest: Manifest | null,
   pageCache: Map<string, NotionPage[]>,
@@ -128,21 +129,40 @@ async function applyRenameDetection(
     const pages = await fetchPagesCached(client, source, pageCache);
     const ops = detectRenames(manifest, source.key, pages);
     if (ops.length === 0) continue;
-    applyRenames(manifest, ops);
+    const outcomes = await applyRenames(manifest, ops, SKILLS_STORE, scope.targets);
     touched = true;
-    for (const op of ops) {
-      console.log(
-        chalk.cyan(
-          `↪ ${op.oldSourceSlug} → ${op.newSourceSlug} ${chalk.dim(`(${source.key}; local '${op.localSlug}' stays)`)}`,
-        ),
-      );
+    for (const outcome of outcomes) {
+      if (outcome.status === "renamed") {
+        const sameLocalName = outcome.newLocalSlug === outcome.op.localSlug;
+        const sourceChanged = outcome.op.oldSourceSlug !== outcome.op.newSourceSlug;
+        let line: string;
+        if (sourceChanged && !sameLocalName) {
+          line = `↪ ${outcome.op.oldSourceSlug} → ${outcome.op.newSourceSlug} ${chalk.dim(`(${source.key})`)}` +
+            chalk.dim(` (local: ${outcome.op.localSlug} → ${outcome.newLocalSlug})`);
+        } else if (!sourceChanged && !sameLocalName) {
+          line = `↪ local: ${outcome.op.localSlug} → ${outcome.newLocalSlug} ${chalk.dim(`(${source.key}; catching up)`)}`;
+        } else {
+          line = `↪ ${outcome.op.oldSourceSlug} → ${outcome.op.newSourceSlug} ${chalk.dim(`(${source.key})`)}`;
+        }
+        console.log(chalk.cyan(line));
+      } else {
+        const reason =
+          outcome.reason.kind === "collision-manifest"
+            ? `local slug "${outcome.reason.conflictWith}" already in use`
+            : `local dir "${outcome.reason.path}" already exists`;
+        console.log(
+          chalk.yellow(
+            `⚠ ${outcome.op.oldSourceSlug} → ${outcome.op.newSourceSlug} (${source.key}): ${reason}. Local '${outcome.op.localSlug}' stays.`,
+          ),
+        );
+      }
     }
   }
   if (!touched) return;
   try {
     await writeManifest(MANIFEST_FILE, manifest);
   } catch {
-    // best-effort: persistence failure here is recoverable on next sync.
+    // best-effort
   }
 }
 
