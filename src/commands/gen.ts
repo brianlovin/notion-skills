@@ -117,6 +117,34 @@ export async function genCommand(
           chalk.dim(` to share.`),
       );
     }
+
+    // Auto-audit each new draft. Surface issues here (gen-time) so
+    // the user can fix before publish, not after. Errors don't block
+    // gen — the draft is on disk regardless.
+    if (newDrafts.length > 0) {
+      const { auditSkill, loadAuditTarget, summariseIssues } = await import(
+        "../audit.js"
+      );
+      let any = false;
+      for (const slug of newDrafts) {
+        const target = await loadAuditTarget(slug, join(SKILLS_STORE, slug));
+        if (!target) continue;
+        const issues = auditSkill(target);
+        if (issues.length === 0) continue;
+        if (!any) {
+          console.log("");
+          any = true;
+        }
+        const s = summariseIssues(issues);
+        const tag =
+          s.errors > 0
+            ? chalk.red(`✗ ${slug}`)
+            : s.warnings > 0
+              ? chalk.yellow(`⚠ ${slug}`)
+              : chalk.cyan(`ℹ ${slug}`);
+        console.log(`  ${tag} ${chalk.dim(`(${issues.length} audit ${issues.length === 1 ? "issue" : "issues"} — run \`notion-skills audit ${slug}\`)`)}`);
+      }
+    }
   } else {
     console.log("");
     console.log(

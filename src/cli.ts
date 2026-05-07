@@ -19,6 +19,7 @@ import { installCommand } from "./commands/install.js";
 import { uninstallCommand } from "./commands/uninstall.js";
 import { unpublishCommand } from "./commands/unpublish.js";
 import { openCommand } from "./commands/open.js";
+import { auditCommand } from "./commands/audit.js";
 import {
   sourceAddCommand,
   sourceDefaultCommand,
@@ -88,6 +89,16 @@ program
   .description("Inspect notion-skills state and surface actionable issues")
   .option("--fix", "auto-repair warnings where safe")
   .action(doctorCommand);
+
+program
+  .command("audit")
+  .description("Run quality checks against your skills (description, body, test markers, agent-routing keywords). Like `npm audit`.")
+  .argument("[slugs...]", "audit specific local slugs (defaults to every skill on this machine)")
+  .option("--drafts", "only audit local drafts (pre-publish quality check)")
+  .option("--installed", "only audit installed skills")
+  .option("--source <key>", "only audit skills installed from this source")
+  .option("--json", "machine-readable JSON output")
+  .action(auditCommand);
 
 program
   .command("upgrade")
