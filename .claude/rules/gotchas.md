@@ -41,6 +41,7 @@ Anything else is an error.
 - `last_edited_time` rounds to the minute. See `.claude/rules/drift.md`.
 - `incrementPageNumber` (used for the Installs counter) is fail-soft — install succeeds even if the metric PATCH fails. Don't await its result for control flow.
 - Self-healing selects (`Tags`, `Model`, `Agent`) auto-add unknown options on publish via `ensureSelectOptions`. Don't pre-populate the option list in `SCHEMA`; let it grow naturally.
+- **A markdown page edit replaces the page's entire content, child pages included.** Sibling files are child pages, so pushing a body wipes them unless each one is carried forward by a `<page url="..." />` tag — that's what `withPreservedChildPages` builds. `--allow-deleting-content` is the *opt-in to deletion*, not a safety flag; only pass it for leaf pages that host no files. The tag must be self-closing: `<page url="...">` without the slash fails with the same "would delete N child page(s)" validation error as omitting it.
 
 ## Build / test loop
 

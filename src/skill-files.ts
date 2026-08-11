@@ -234,6 +234,43 @@ export async function hashLocalSkillDir(
 }
 
 /**
+ * Notion's markdown page-edit API replaces a page's *entire* content.
+ * Child pages absent from the new markdown are deleted — that is
+ * precisely what `--allow-deleting-content` authorises. Sibling files
+ * ARE child pages, so a naive body push wipes every file on the skill
+ * and forces `upsertSkillFilePages` to recreate all of them.
+ *
+ * Referencing a child page with a `<page url="..." />` tag keeps it in
+ * place, with its id, history and comments intact.
+ *
+ * The tag MUST be self-closing. `<page url="...">` without the slash is
+ * rejected by the API with the same "would delete N child page(s)"
+ * validation error as omitting it entirely.
+ */
+export function withPreservedChildPages(
+  markdown: string,
+  childPageIds: string[],
+): string {
+  if (childPageIds.length === 0) return markdown;
+  const tags = childPageIds
+    .map((id) => `<page url="${notionPageUrl(id)}" />`)
+    .join("\n");
+  return `${markdown.replace(/\s+$/, "")}\n\n${tags}\n`;
+}
+
+/** Canonical page URL for a page id, dashed or bare. */
+export function notionPageUrl(pageId: string): string {
+  return `https://www.notion.so/${pageId.replace(/-/g, "")}`;
+}
+
+/** Ids of the child pages among a block list — the sibling files. */
+export function childPageIdsFrom(
+  blocks: Array<{ id: string; type: string }>,
+): string[] {
+  return blocks.filter((b) => b.type === "child_page").map((b) => b.id);
+}
+
+/**
  * Upsert a parent skill page's child pages to match a desired set of
  * SkillFiles, applying spec category nesting:
  *
