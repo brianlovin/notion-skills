@@ -10,11 +10,13 @@ import {
   hashLocalSkillDir,
   isSafeRelativePath,
   isSpecCategoryName,
+  maxChildPageEdited,
   notionPageUrl,
   parseFromChildPage,
   readLocalSkillFiles,
   renderForChildPage,
   specCategoryOf,
+  specWrapperIds,
   upsertSkillFilePages,
   withPreservedChildPages,
 } from "../dist/skill-files.js";
@@ -506,4 +508,81 @@ test("withPreservedChildPages: body keeps its content, tags go last", () => {
   assert.ok(out.trimEnd().endsWith('" />'), "tags appended at the end");
   // Trailing whitespace collapses to exactly one blank line before tags.
   assert.ok(!out.includes("\n\n\n"), "no runaway blank lines");
+});
+
+// multi-file drift signals ────────────────────────────────────────────
+
+test("maxChildPageEdited: newest child page timestamp wins", () => {
+  assert.equal(
+    maxChildPageEdited([
+      { id: "a", type: "child_page", last_edited_time: "2026-08-11T17:08:00.000Z" },
+      { id: "b", type: "child_page", last_edited_time: "2026-08-11T17:30:00.000Z" },
+      { id: "c", type: "child_page", last_edited_time: "2026-08-11T17:12:00.000Z" },
+    ]),
+    "2026-08-11T17:30:00.000Z",
+  );
+});
+
+// The parent's own body blocks move independently of its child pages,
+// so they must not contribute to the file-edit signal.
+test("maxChildPageEdited: content blocks are ignored", () => {
+  assert.equal(
+    maxChildPageEdited([
+      { id: "a", type: "paragraph", last_edited_time: "2099-01-01T00:00:00.000Z" },
+      { id: "b", type: "child_page", last_edited_time: "2026-08-11T17:08:00.000Z" },
+    ]),
+    "2026-08-11T17:08:00.000Z",
+  );
+});
+
+test("maxChildPageEdited: no child pages yields empty string", () => {
+  assert.equal(maxChildPageEdited([{ id: "a", type: "paragraph" }]), "");
+  assert.equal(maxChildPageEdited([]), "");
+});
+
+test("maxChildPageEdited: tolerates a child page with no timestamp", () => {
+  assert.equal(
+    maxChildPageEdited([
+      { id: "a", type: "child_page" },
+      { id: "b", type: "child_page", last_edited_time: "2026-08-11T17:08:00.000Z" },
+    ]),
+    "2026-08-11T17:08:00.000Z",
+  );
+});
+
+// Files under scripts/ references/ assets/ are grandchildren: editing
+// one bumps its own block, never the wrapper's. Miss the wrapper and
+// those edits go undetected.
+test("specWrapperIds: finds spec category wrappers only", () => {
+  assert.deepEqual(
+    specWrapperIds([
+      { id: "w1", type: "child_page", child_page: { title: "references" } },
+      { id: "f1", type: "child_page", child_page: { title: "LANGUAGE.md" } },
+      { id: "w2", type: "child_page", child_page: { title: "scripts" } },
+      { id: "w3", type: "child_page", child_page: { title: "assets" } },
+      { id: "p1", type: "paragraph" },
+    ]),
+    ["w1", "w2", "w3"],
+  );
+});
+
+test("specWrapperIds: non-spec dirs are not wrappers", () => {
+  // `lib/` is not a spec dir, so its files are flat children titled
+  // "lib/foo.mjs" — already covered by the top-level scan.
+  assert.deepEqual(
+    specWrapperIds([
+      { id: "a", type: "child_page", child_page: { title: "lib/util.mjs" } },
+      { id: "b", type: "child_page", child_page: { title: "Scripts" } },
+    ]),
+    [],
+  );
+});
+
+test("specWrapperIds: titles are trimmed before matching", () => {
+  assert.deepEqual(
+    specWrapperIds([
+      { id: "w", type: "child_page", child_page: { title: " scripts " } },
+    ]),
+    ["w"],
+  );
 });
