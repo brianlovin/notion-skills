@@ -19,6 +19,7 @@ import { MANIFEST_FILE, ROOT_DIR, SKILLS_STORE } from "../paths.js";
 import { readManifest } from "../manifest.js";
 import { runSync, printSummary } from "../sync.js";
 import {
+  childPageIdsFrom,
   readLocalSkillFiles,
   type SkillFile,
   upsertSkillFilePages,
@@ -340,7 +341,15 @@ async function pushOnePage(
       await client.updateSkillPageProperties(pageId, c.skill.properties, existingColumns);
     }
     if (c.skill.body.trim()) {
-      await ntnSetPageMarkdown(pageId, c.skill.body);
+      // Overwriting an existing page? It may already host sibling-file
+      // child pages; carry them through the body replace. A freshly
+      // created page has none and takes the cheap path.
+      const existingChildPageIds = isOverwrite
+        ? childPageIdsFrom(await client.getBlockChildren(pageId))
+        : [];
+      await ntnSetPageMarkdown(pageId, c.skill.body, {
+        preserveChildPageIds: existingChildPageIds,
+      });
     }
     await pushSkillFiles(client, pageId, c.skill.source);
     task.done(isOverwrite ? "(updated)" : undefined);

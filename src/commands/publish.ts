@@ -21,6 +21,7 @@ import {
 } from "../page-hash.js";
 import { NotionClient, readCheckbox, readTitle } from "../notion.js";
 import {
+  childPageIdsFrom,
   hashLocalSkillDir,
   readLocalSkillFiles,
   type SkillFile,
@@ -279,8 +280,16 @@ async function pushUpdates(
         { ...p.properties, published: true } as never,
         existingColumns,
       );
+      // Snapshot the sibling-file pages BEFORE replacing the body: the
+      // body push must carry them forward, or Notion deletes them and
+      // the upsert below rebuilds all of them from scratch.
+      const existingChildPageIds = childPageIdsFrom(
+        await client.getBlockChildren(p.pageId),
+      );
       if (p.body.trim()) {
-        await ntnSetPageMarkdown(p.pageId, p.body);
+        await ntnSetPageMarkdown(p.pageId, p.body, {
+          preserveChildPageIds: existingChildPageIds,
+        });
       }
       await upsertSkillFilePages(client, ntnSetPageMarkdown, p.pageId, p.files);
       pushed.push({ localSlug: p.localSlug, sourceSlug: p.sourceSlug, pageId: p.pageId });

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { LOGS_DIR, NTN_ERROR_LOG } from "./paths.js";
+import { withPreservedChildPages } from "./skill-files.js";
 
 export class NtnNotInstalledError extends Error {
   constructor() {
@@ -249,10 +250,22 @@ export async function ntnVersion(): Promise<string | null> {
  * unless they're attached with `=`. This bites multi-file skills whose
  * sibling files lead with a markdown bullet (`- item`).
  */
-export async function ntnSetPageMarkdown(pageId: string, markdown: string): Promise<void> {
-  const result = await spawnNtn(
-    ["pages", "update", pageId, `--content=${markdown}`, "--allow-deleting-content"],
-  );
+export async function ntnSetPageMarkdown(
+  pageId: string,
+  markdown: string,
+  opts: { preserveChildPageIds?: string[] } = {},
+): Promise<void> {
+  // A page that hosts sibling files must keep them: reference each one
+  // with a <page url="..." /> tag and drop --allow-deleting-content, so
+  // a tag we failed to emit fails loudly with a 400 instead of silently
+  // trashing the file. Leaf pages (no children) keep the old path.
+  const preserve = opts.preserveChildPageIds ?? [];
+  const content =
+    preserve.length > 0 ? withPreservedChildPages(markdown, preserve) : markdown;
+  const args = ["pages", "update", pageId, `--content=${content}`];
+  if (preserve.length === 0) args.push("--allow-deleting-content");
+
+  const result = await spawnNtn(args);
   if (result.code === 4 || /API token is invalid/i.test(result.stderr)) {
     throw new NtnAuthError();
   }

@@ -5,15 +5,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   SPEC_CATEGORY_DIRS,
+  childPageIdsFrom,
   classifyExtension,
   hashLocalSkillDir,
   isSafeRelativePath,
   isSpecCategoryName,
+  notionPageUrl,
   parseFromChildPage,
   readLocalSkillFiles,
   renderForChildPage,
   specCategoryOf,
   upsertSkillFilePages,
+  withPreservedChildPages,
 } from "../dist/skill-files.js";
 import { hashSkillContent } from "../dist/page-hash.js";
 
@@ -436,4 +439,71 @@ test("upsertSkillFilePages: spec category names at root never archived as orphan
 
   // The wrapper sub-page should NOT be archived (it's still in use).
   assert.ok(!client.archived.has(wrapperId), "wrapper preserved");
+});
+
+// child page preservation across a body replace ──────────────────────
+
+test("childPageIdsFrom: picks out child pages, ignores content blocks", () => {
+  assert.deepEqual(
+    childPageIdsFrom([
+      { id: "b1", type: "paragraph" },
+      { id: "b2", type: "child_page" },
+      { id: "b3", type: "heading_2" },
+      { id: "b4", type: "child_page" },
+    ]),
+    ["b2", "b4"],
+  );
+});
+
+test("childPageIdsFrom: no child pages yields empty list", () => {
+  assert.deepEqual(
+    childPageIdsFrom([{ id: "b1", type: "paragraph" }]),
+    [],
+  );
+});
+
+test("notionPageUrl: strips dashes from a page id", () => {
+  assert.equal(
+    notionPageUrl("3b9c711c-0ceb-81dd-b3bb-dd9c8974ea42"),
+    "https://www.notion.so/3b9c711c0ceb81ddb3bbdd9c8974ea42",
+  );
+  // Already-bare ids pass through unchanged.
+  assert.equal(
+    notionPageUrl("3b9c711c0ceb81ddb3bbdd9c8974ea42"),
+    "https://www.notion.so/3b9c711c0ceb81ddb3bbdd9c8974ea42",
+  );
+});
+
+test("withPreservedChildPages: no ids leaves markdown untouched", () => {
+  assert.equal(withPreservedChildPages("# Body\n", []), "# Body\n");
+});
+
+// Regression: a body push used to replace the parent page wholesale,
+// deleting the child pages that hold the skill's sibling files. Every
+// re-publish then recreated all of them from scratch.
+test("withPreservedChildPages: appends a self-closing tag per child page", () => {
+  const out = withPreservedChildPages("# Body\n\nText.", ["aaa-bbb", "ccc-ddd"]);
+  assert.equal(
+    out,
+    "# Body\n\nText.\n\n" +
+      '<page url="https://www.notion.so/aaabbb" />\n' +
+      '<page url="https://www.notion.so/cccddd" />\n',
+  );
+});
+
+// The API rejects `<page url="...">` without the trailing slash with the
+// same "would delete N child page(s)" error as omitting the tag, so the
+// self-closing form is load-bearing, not cosmetic.
+test("withPreservedChildPages: tags are self-closing", () => {
+  const out = withPreservedChildPages("# Body", ["aaa"]);
+  assert.match(out, /<page url="[^"]+" \/>/);
+  assert.doesNotMatch(out, /<page url="[^"]+">/);
+});
+
+test("withPreservedChildPages: body keeps its content, tags go last", () => {
+  const out = withPreservedChildPages("# Body\n\nKeep me.\n\n\n", ["aaa"]);
+  assert.ok(out.startsWith("# Body\n\nKeep me."), "body preserved");
+  assert.ok(out.trimEnd().endsWith('" />'), "tags appended at the end");
+  // Trailing whitespace collapses to exactly one blank line before tags.
+  assert.ok(!out.includes("\n\n\n"), "no runaway blank lines");
 });
