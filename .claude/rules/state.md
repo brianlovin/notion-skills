@@ -26,6 +26,7 @@ Manifest is keyed by `local_slug` — the dir name on disk and what every agent 
 - `body_hash` — hash over body + sibling file content.
 - `local_hash` — hash of the on-disk skill dir.
 - `files` — sibling file paths (multi-file skill marker).
+- `files_edited_max` — newest child-page `last_edited_time`; the multi-file fast-path hint.
 
 Top-level `hash_v: 3` marks the current drift-hash scheme. Pre-`hash_v=3` manifests still load; sync rebaselines them.
 

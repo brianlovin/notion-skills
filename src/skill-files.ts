@@ -51,6 +51,51 @@ export function isSpecCategoryName(name: string): name is SpecCategoryDir {
   return (SPEC_CATEGORY_DIRS as readonly string[]).includes(name);
 }
 
+/** The shape of a block we need for child-page drift signals. */
+export interface ChildPageLike {
+  id: string;
+  type: string;
+  child_page?: { title?: string };
+  last_edited_time?: string;
+}
+
+/**
+ * Newest `last_edited_time` across the child pages in a block list, or
+ * "" when there are none.
+ *
+ * Notion stamps these ISO-8601 UTC with a fixed width, so lexicographic
+ * max is chronological max.
+ */
+export function maxChildPageEdited(blocks: ChildPageLike[]): string {
+  let max = "";
+  for (const b of blocks) {
+    if (b.type !== "child_page") continue;
+    const t = b.last_edited_time;
+    if (t && t > max) max = t;
+  }
+  return max;
+}
+
+/**
+ * Spec-category wrappers among a parent's blocks. Files under
+ * `scripts/`, `references/` and `assets/` are grandchildren of the
+ * skill page, so a drift check has to look one level deeper: editing
+ * `references/api.md` bumps that page's own block, not the wrapper's.
+ *
+ * Depth stops here — `upsertSkillFilePages` flattens any deeper path
+ * into the wrapper's direct child (`support-topics/foo.md`), so a
+ * parent + one wrapper level covers every file.
+ */
+export function specWrapperIds(blocks: ChildPageLike[]): string[] {
+  return blocks
+    .filter(
+      (b) =>
+        b.type === "child_page" &&
+        isSpecCategoryName((b.child_page?.title ?? "").trim()),
+    )
+    .map((b) => b.id);
+}
+
 export interface SkillFile {
   /** Relative path from the skill directory (POSIX-style). */
   path: string;

@@ -19,9 +19,15 @@ The `taxonomyOnly` and `metricOnly` flags in `src/schema.ts` are what excludes T
 ## Two-phase outdated check (`list`)
 
 1. **Fast path**: `page.last_edited_time === entry.last_edited_time` → not outdated. Most common case, no API calls.
-2. **Slow path**: `props_hash` differs → outdated. Else fetch parent body + every child page, compare `hashSkillContent`. If both match, the page was touched by a metric or tag edit; cache the fresh `last_edited_time` + `body_hash` so the next `list` short-circuits on the fast path.
+2. **Slow path**: `props_hash` differs → outdated. Else fetch parent body + every child page, compare `hashSkillContent`. If both match, the page was touched by a metric or tag edit; cache the fresh `last_edited_time` + `body_hash` (+ `files_edited_max`) so the next `list` short-circuits on the fast path.
 
-**Multi-file skills always take the slow path.** Notion doesn't reliably bump the parent's `last_edited_time` when only a child page is edited, so the fast path can silently miss those edits. The manifest entry's `files: string[]` carries the list of sibling files; whenever it's non-empty, drift checks fetch children unconditionally. Same rule applies in `sync.ts`: every multi-file skill is force-included in the refetch set.
+**Multi-file skills get their own fast path.** Notion doesn't bump the *parent's* `last_edited_time` when only a child page is edited, so the single-file fast path can't see those edits. But each `child_page` block carries its own `last_edited_time`, and that one does move — so the pair (parent timestamp, newest child timestamp) answers "did anything change?" without downloading content. `files_edited_max` on the manifest entry caches the newest child timestamp; when both halves match, `list` short-circuits.
+
+Cost is one block listing per skill, plus one per spec-category wrapper. **The wrapper hop is load-bearing**: files under `scripts/` `references/` `assets/` are grandchildren, and editing one bumps its own block, never the wrapper's. Depth stops there — `upsertSkillFilePages` flattens deeper paths into the wrapper's direct children (`support-topics/foo.md`).
+
+Entries written before `files_edited_max` existed simply take the slow path once and get rebaselined, same as `body_hash`. The hash comparison remains the source of truth; the timestamps only decide whether it's worth computing.
+
+`sync.ts` still force-includes every multi-file skill in the refetch set — it hasn't been moved onto this signal yet.
 
 `list` writing to the manifest is intentional (transparent perf cache update). The next run is faster; the data on disk is always at least as fresh.
 

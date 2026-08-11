@@ -62,11 +62,23 @@ export interface ManifestEntry {
   /**
    * Relative paths of sibling files round-tripped through Notion as
    * child pages. When present and non-empty, the skill is multi-file
-   * and `list`'s drift check always takes the slow path — parent's
-   * `last_edited_time` doesn't bump on child-only edits, so the fast
-   * path can't see them.
+   * and needs `files_edited_max` to short-circuit its drift check —
+   * the parent's own `last_edited_time` doesn't bump on child-only
+   * edits.
    */
   files?: string[];
+  /**
+   * Newest `last_edited_time` across the skill's sibling-file child
+   * pages, as of the last write to this entry. The parent page's
+   * timestamp does NOT move when only a child is edited, but each
+   * `child_page` block carries its own that does — so this is the
+   * fast-path hint for multi-file skills, mirroring what
+   * `last_edited_time` does for single-file ones.
+   *
+   * Optional: absent on manifests written before this existed, which
+   * simply take the slow path once and get rebaselined by `list`.
+   */
+  files_edited_max?: string;
 }
 
 export interface Manifest {

@@ -13,6 +13,7 @@ import {
 } from "../notion.js";
 import { assertNtnInstalled } from "../ntn.js";
 import { fetchPageContent, slugify } from "../convert.js";
+import { maxChildPageEdited, specWrapperIds } from "../skill-files.js";
 import { getScope, type Scope } from "../scope.js";
 import { MANIFEST_FILE, SKILLS_STORE } from "../paths.js";
 import {
@@ -265,10 +266,17 @@ async function runDriftChecks(
     const result = await checkDrift(client, row._page, entry, manifest);
     if (result.outdated) {
       row.state = "outdated";
-    } else if (result.refreshedLastEditedTime || result.refreshedBodyHash !== undefined) {
+    } else if (
+      result.refreshedLastEditedTime ||
+      result.refreshedBodyHash !== undefined ||
+      result.refreshedFilesEditedMax !== undefined
+    ) {
       const patch: Partial<ManifestEntry> = {};
       if (result.refreshedLastEditedTime) patch.last_edited_time = result.refreshedLastEditedTime;
       if (result.refreshedBodyHash !== undefined) patch.body_hash = result.refreshedBodyHash;
+      if (result.refreshedFilesEditedMax !== undefined) {
+        patch.files_edited_max = result.refreshedFilesEditedMax;
+      }
       patches.push([row.name, patch]);
     }
     delete row._page;
@@ -557,6 +565,26 @@ interface DriftResult {
   outdated: boolean;
   refreshedLastEditedTime?: string;
   refreshedBodyHash?: string;
+  refreshedFilesEditedMax?: string;
+}
+
+/**
+ * Newest edit across a skill's sibling-file pages. Costs one block
+ * listing for the parent plus one per spec-category wrapper (0–3), vs
+ * the full content download the hash comparison needs.
+ */
+async function newestFileEdit(
+  client: NotionClient,
+  pageId: string,
+): Promise<string> {
+  const blocks = await client.getBlockChildren(pageId);
+  let max = maxChildPageEdited(blocks);
+  for (const wrapperId of specWrapperIds(blocks)) {
+    const inner = await client.getBlockChildren(wrapperId);
+    const innerMax = maxChildPageEdited(inner);
+    if (innerMax > max) max = innerMax;
+  }
+  return max;
 }
 
 async function checkDrift(
@@ -570,6 +598,27 @@ async function checkDrift(
   if (!isMultiFile && page.last_edited_time === entry.last_edited_time) {
     return { outdated: false };
   }
+
+  // Multi-file fast path. The parent's timestamp covers the body; each
+  // child_page block's own timestamp covers a sibling file. Together
+  // they answer "did anything change?" without downloading content.
+  // Absent cache (older manifests) falls through and gets rebaselined.
+  let filesEditedMax: string | undefined;
+  if (isMultiFile) {
+    try {
+      filesEditedMax = await newestFileEdit(client, page.id);
+    } catch {
+      return { outdated: false };
+    }
+    if (
+      page.last_edited_time === entry.last_edited_time &&
+      entry.files_edited_max !== undefined &&
+      filesEditedMax === entry.files_edited_max
+    ) {
+      return { outdated: false };
+    }
+  }
+
   const currentPropsHash = hashBehaviorProperties(page);
   if (currentPropsHash !== entry.props_hash) return { outdated: true };
   let body: string;
@@ -589,6 +638,7 @@ async function checkDrift(
     outdated: false,
     refreshedLastEditedTime: page.last_edited_time,
     refreshedBodyHash: currentBodyHash,
+    refreshedFilesEditedMax: filesEditedMax,
   };
 }
 
