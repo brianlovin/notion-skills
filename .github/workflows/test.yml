@@ -16,6 +16,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  pinned-actions:
+    # Every `uses:` must be a full commit SHA; tags/branches can be re-pointed
+    # at malicious code. No install or secrets needed.
+    name: Actions pinned to SHAs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Check pinned actions
+        run: node scripts/check-pinned-actions.mjs
+
   test:
     name: Build + test
     runs-on: ubuntu-latest
