@@ -15,6 +15,7 @@ After making changes:
 
 - `npm test` — runs `tsc` then `node --test test/*.test.mjs`.
 - For CLI/UX changes, exercise via `notion-skills <subcommand>` against the live Notion store (`npm link` resolves it to the local build).
+- If you edit `.github/**`, run `npm run lint:actions`. Every `uses:` must be pinned to a full 40-char commit SHA with the version as a trailing comment (`uses: actions/checkout@<sha> # v5`); CI's `Actions pinned to SHAs` job enforces it and Dependabot bumps the SHAs.
 - If you edit `skills/notion-skills-usage/SKILL.md`, run `npx intent validate` — it runs in `prepublishOnly` and gates publish.
 
 When fixing a bug, prefer "extract pure helper, write regression test, fix" over patching the orchestrator in place.

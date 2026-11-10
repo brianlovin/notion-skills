@@ -17,6 +17,7 @@
     "dev": "tsc --watch",
     "test": "npm run build && node --test test/*.test.mjs",
     "validate-skills": "intent validate",
+    "lint:actions": "node scripts/check-pinned-actions.mjs",
     "prepublishOnly": "npm run build && npm test && npm run validate-skills"
   },
   "engines": {
