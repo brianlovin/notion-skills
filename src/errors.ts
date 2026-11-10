@@ -47,7 +47,7 @@ const PATTERNS: Pattern[] = [
     build: () => ({
       summary: "`ntn` isn't installed.",
       detail: "notion-skills uses Notion's official CLI for API access.",
-      suggest: "Install: https://github.com/makenotion/cli",
+      suggest: "Install: brew install --cask notion-cli",
     }),
   },
   {

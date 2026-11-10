@@ -19,7 +19,7 @@ AI coding agents (Claude Code, Codex, OpenCode, Cursor, Gemini) all read [skills
 ## Get started
 
 ```bash
-brew install ntn               # the Notion CLI we shell out to
+brew install --cask notion-cli  # the Notion CLI (`ntn`) we shell out to
 ntn login
 
 npm install -g @brianlovin/notion-skills

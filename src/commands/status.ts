@@ -22,7 +22,7 @@ export async function statusCommand(): Promise<void> {
     }
   } else {
     console.log(chalk.red("  ✗ ntn not installed"));
-    console.log(chalk.dim("    Install: https://github.com/makenotion/cli"));
+    console.log(chalk.dim("    Install: brew install --cask notion-cli"));
   }
   console.log("");
 

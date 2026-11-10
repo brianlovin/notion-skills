@@ -102,7 +102,7 @@ async function checkNtn(): Promise<CheckResult[]> {
       {
         status: "fail",
         label: "ntn is not installed",
-        detail: "Install: https://github.com/makenotion/ntn-cli",
+        detail: "Install: brew install --cask notion-cli",
       },
     ];
   }
